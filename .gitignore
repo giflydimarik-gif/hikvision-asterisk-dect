@@ -1,0 +1,13 @@
+# Never publish live credentials or captures
+*.pcap
+*.cap
+*.log
+*.bak
+*.secret
+*.secrets
+secrets/
+.env
+
+# Local/private Asterisk files
+pjsip.conf
+extensions.conf
