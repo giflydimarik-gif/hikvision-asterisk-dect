@@ -1,0 +1,5 @@
+[general]
+; Default Asterisk RTP range is usually fine.
+; Keep the RTP ports open between Asterisk, the Hikvision panel and the SIP/DECT device.
+rtpstart=10000
+rtpend=20000
