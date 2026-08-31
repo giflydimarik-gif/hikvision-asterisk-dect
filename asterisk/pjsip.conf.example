@@ -1,0 +1,65 @@
+; Tested layout, sanitized for publication.
+; Replace example addresses/passwords with your own values.
+
+[global]
+type=global
+user_agent=Home-Asterisk
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+; DECT/SIP line on Netcraze/Keenetic
+[101]
+type=endpoint
+context=internal
+callerid="DECT handset" <101>
+disallow=all
+allow=alaw
+allow=ulaw
+auth=auth101
+aors=101
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[auth101]
+type=auth
+auth_type=userpass
+username=101
+password=<SIP_PASSWORD_101>
+
+[101]
+type=aor
+max_contacts=1
+remove_existing=yes
+
+; Hikvision outdoor door station
+[105]
+type=endpoint
+context=internal
+callerid=Gate <105>
+disallow=all
+allow=alaw
+allow=ulaw
+allow=h264
+auth=auth105
+aors=105
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[auth105]
+type=auth
+auth_type=userpass
+username=105
+password=<SIP_PASSWORD_105>
+
+[105]
+type=aor
+max_contacts=1
+remove_existing=yes
+qualify_frequency=30
