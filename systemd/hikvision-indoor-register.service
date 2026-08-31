@@ -1,0 +1,13 @@
+[Unit]
+Description=Hikvision Indoor Extension registration
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/run-hikvision-register.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
