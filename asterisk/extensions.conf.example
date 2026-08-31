@@ -1,0 +1,21 @@
+[general]
+static=yes
+writeprotect=no
+
+[internal]
+
+; Hikvision door station calls extension 101.
+; The important part for gate unlocking is NOT a Python call:
+; after the handset answers, DTMF '#' is passed through the bridged SIP/RTP call
+; to the Hikvision panel. The panel itself interprets '#' as the unlock command.
+exten => 101,1,Dial(PJSIP/101,40)
+ same => n,Hangup()
+
+; Optional test extension
+exten => 600,1,Answer()
+ same => n,Echo()
+ same => n,Hangup()
+
+; Direct call to the outdoor panel, useful for tests
+exten => 105,1,Dial(PJSIP/105,30)
+ same => n,Hangup()
