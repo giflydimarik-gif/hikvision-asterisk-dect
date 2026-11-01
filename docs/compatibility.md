@@ -12,7 +12,7 @@ private images are needed to reproduce the public examples.
 | Snapshot | Existing camera transport and the public examples are available | Add-on snapshot option is off; new polled-ring patch has isolated tests only |
 | Local SIP registration | Existing Asterisk and Hikvision registration services running | Does not establish that every current DECT handset rang, audio worked, or DTMF unlocked a gate during this review |
 | Original Netcraze NC1812 + DECT101 example | README records the previously tested setup | Do not present it as an independently tested Gigaset N510 configuration |
-| Indoor quiet mode / scene / broadcast | Capability review is pending | Do not expose working controls, mute an outdoor panel, or change firmware to infer support |
+| VDP-H3212W, V2.2.22 build 230720 | Read-only SDK login; current scene `atHome` and AudioOut GET succeeded | Setting a scene, restoring volume and broadcast are not physically tested; the listed call commands are capabilities, not proof of successful answer |
 | Wall-panel video / microphone | Video and two-way audio need separate checks | One-way audio support does not establish microphone support; an insecure browser context may restrict a microphone |
 | Gate state | Independent existing position sensor | Relay state and an HTTP success response do not prove gate movement |
 
@@ -20,3 +20,8 @@ The deployment plan and private infrastructure details live in our private
 operations repository. Public examples retain placeholders; never copy local
 credential files, launch data, private camera frames or raw SIP authentication
 logs into issues.
+
+For quiet hours, preserve the actual indoor volume across restarts. The current
+add-on keeps the previous volume in memory; repeated mute and restart behavior
+must be considered before treating an unmute to the default 7 as restoration.
+Notifications should remain independent of indoor sound.

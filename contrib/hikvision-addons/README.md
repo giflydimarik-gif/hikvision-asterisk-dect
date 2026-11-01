@@ -3,6 +3,7 @@
 These are independent, reviewable contributions against upstream commit
 `fb6abc177f62c480e39a6dbc9dbee997875c76a9` (main, reviewed 2026-11-01).
 They are **not an upstream release** and have **not been installed on our live intercom**.
+The three changes are proposed as separate commits in [draft PR #390](https://github.com/pergolafabio/Hikvision-Addons/pull/390).
 
 | Patch | Result | Verification |
 | --- | --- | --- |
