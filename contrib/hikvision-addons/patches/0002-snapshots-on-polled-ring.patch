@@ -1,0 +1,276 @@
+diff --git a/hikvision-doorbell/src/mqtt.py b/hikvision-doorbell/src/mqtt.py
+index b6b78be..24ee874 100644
+--- a/hikvision-doorbell/src/mqtt.py
++++ b/hikvision-doorbell/src/mqtt.py
+@@ -164,6 +164,9 @@ class MQTTHandler(EventHandler):
+ 
+         # Initialize task storage at the start
+         self._call_sensor_tasks: dict[Doorbell, asyncio.Task] = {}
++        self._call_states: dict[Doorbell, str] = {}
++        self._call_state_versions: dict[Doorbell, int] = {}
++        self._snapshot_tasks: dict[Doorbell, asyncio.Task] = {}
+         
+         # Save the MQTT settings as an attribute with the shared client
+         self._client = get_shared_client(config)
+@@ -231,7 +234,7 @@ class MQTTHandler(EventHandler):
+                             if call_status_obj:
+                                 call_state = call_status_obj.get("status")
+                                 if call_state:
+-                                    c.set_state(call_state)
++                                    self._set_call_state(d, call_state)
+                                     logger.info("Call sensor polling for : {} changed to {}", d._config.name, call_state)
+                             else:
+                                 logger.warning("Unexpected ISAPI response from {}: {}", d._config.name, response)
+@@ -308,6 +311,40 @@ class MQTTHandler(EventHandler):
+                     _register_reconnect_handler(com_switch)
+                     self._sensors[doorbell][f'com_{com_id}'] = com_switch
+ 
++    def _set_call_state(self, doorbell: Doorbell, state: str) -> int:
++        """Keep public state values and take one opt-in snapshot per ring edge."""
++        previous = self._call_states.get(doorbell)
++        if previous != state:
++            self._call_state_versions[doorbell] = self._call_state_versions.get(doorbell, 0) + 1
++        self._call_states[doorbell] = state
++        self._sensors[doorbell]['call'].set_state(state)
++        ringing = ('ring', 'ringing')
++        if state in ringing and previous not in ringing and doorbell._config.snapshot is True:
++            pending = self._snapshot_tasks.get(doorbell)
++            if pending is None or pending.done():
++                self._snapshot_tasks[doorbell] = asyncio.create_task(self._publish_call_snapshot(doorbell))
++            else:
++                logger.warning("Skipping overlapping snapshot for {}", doorbell._config.name)
++        return self._call_state_versions.get(doorbell, 0)
++
++    async def _publish_call_snapshot(self, doorbell: Doorbell):
++        """Shared snapshot path for a new SDK or polled incoming call."""
++        try:
++            from mqtt_input import get_mqtt_input
++            snapshot_path = doorbell.take_snapshot()
++            mqtt_input = get_mqtt_input()
++            if snapshot_path and os.path.exists(snapshot_path):
++                if mqtt_input:
++                    mqtt_input._last_snapshot_paths[doorbell] = snapshot_path
++                    mqtt_input._publish_snapshot_image(doorbell, snapshot_path)
++                    logger.info("Auto-snapshot published to MQTT: {}", snapshot_path)
++                else:
++                    logger.warning("MQTTInput not available, snapshot saved but not published: {}", snapshot_path)
++            else:
++                logger.warning("Auto-snapshot failed or file not created")
++        except Exception as err:
++            logger.error("Failed to take auto-snapshot: {}", err)
++
+     def com_switch_callback(self, client, user_data: tuple[Doorbell, int], message: MQTTMessage):
+         doorbell, com_id = user_data
+         command = message.payload.decode("utf-8")
+@@ -590,53 +627,21 @@ class MQTTHandler(EventHandler):
+                     'device_number': dev_number,   
+                 }
+                 call_sensor.set_attributes(attributes)
+-                call_sensor.set_state('ringing')
+-
+-                # Take snapshot and publish via MQTT
+-                async def take_and_publish_snapshot():
+-                    """Take snapshot and publish to MQTT"""
+-                    try:
+-                        # Import here to avoid circular imports
+-                        from mqtt_input import get_mqtt_input
+-                        
+-                        # Take snapshot
+-                        snapshot_path = doorbell.take_snapshot()
+-                        
+-                        if snapshot_path and os.path.exists(snapshot_path):
+-                            # Get MQTTInput instance
+-                            mqtt_input = get_mqtt_input()
+-                            if mqtt_input:
+-                                # Store the latest snapshot path
+-                                mqtt_input._last_snapshot_paths[doorbell] = snapshot_path
+-                                
+-                                # Publish the image to MQTT
+-                                mqtt_input._publish_snapshot_image(doorbell, snapshot_path)
+-                                logger.info(f"Auto-snapshot published to MQTT: {snapshot_path}")
+-                            else:
+-                                logger.warning("MQTTInput not available, snapshot saved but not published: {}", snapshot_path)
+-                        else:
+-                            logger.warning("Auto-snapshot failed or file not created")
+-                            
+-                    except Exception as e:
+-                        logger.error(f"Failed to take auto-snapshot: {e}")
+-
+-                if doorbell._config.snapshot is True:
+-                    # Start the snapshot task without waiting for it
+-                    logger.info(f"Auto snapshot enabled for doorbell: {doorbell._config.name}")
+-                    asyncio.create_task(take_and_publish_snapshot())
+-                else:
+-                    logger.info(f"Auto snapshot disabled for doorbell: {doorbell._config.name}")
++                state_version = self._set_call_state(doorbell, 'ringing')
+ 
+                 # After 60 seconds, put the sensor back to idle
+                 await asyncio.sleep(60)
+-                logger.info("Updating doorbell sensor back to 'idle' after 60 seconds")
+-                call_sensor.set_state('idle')
++                # Do not let this old timer reset a later call or onCall state.
++                if (self._call_state_versions.get(doorbell) == state_version
++                        and self._call_states.get(doorbell) in ('ring', 'ringing')):
++                    logger.info("Updating doorbell sensor back to 'idle' after 60 seconds")
++                    self._set_call_state(doorbell, 'idle')
+             case VideoInterComAlarmType.DISMISS_INCOMING_CALL:
+                 logger.info("Call dismissed, updating sensor")
+                 logger.debug("Doorbell updating sensor {}", call_sensor)
+-                call_sensor.set_state('dismissed')
++                self._set_call_state(doorbell, 'dismissed')
+                 # Put sensor back to idle
+-                call_sensor.set_state('idle')
++                self._set_call_state(doorbell, 'idle')
+             case VideoInterComAlarmType.ZONE_ALARM:
+                 #zone_name = str(alarm_info.uAlarmInfo.struZoneAlarm.byZoneName,'UTF-8')
+                 zone_type_id = alarm_info.uAlarmInfo.struZoneAlarm.byZoneType
+diff --git a/hikvision-doorbell/tests/test_ring_snapshots.py b/hikvision-doorbell/tests/test_ring_snapshots.py
+new file mode 100644
+index 0000000..fcb8b56
+--- /dev/null
++++ b/hikvision-doorbell/tests/test_ring_snapshots.py
+@@ -0,0 +1,144 @@
++"""Exercise actual transition methods without SDK/broker/network imports."""
++import ast
++import asyncio
++import copy
++import os
++from pathlib import Path
++import sys
++import tempfile
++from types import SimpleNamespace
++import unittest
++from unittest.mock import patch
++
++SOURCE = Path(os.environ.get('HIKVISION_SOURCE_ROOT', Path(__file__).resolve().parents[1] / 'src'))
++
++
++class SilentLog:
++    def __getattr__(self, name):
++        return lambda *args, **kwargs: None
++
++
++class Door:
++    def __init__(self, name='test', enabled=True):
++        self._config = SimpleNamespace(name=name, snapshot=enabled)
++
++
++def subject_type():
++    source = ast.parse((SOURCE / 'mqtt.py').read_text())
++    handler = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'MQTTHandler')
++    methods = [copy.deepcopy(n) for n in handler.body
++               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
++               and n.name in ('_set_call_state', '_publish_call_snapshot')]
++    if len(methods) != 2:
++        raise AssertionError('Snapshot transition handling is absent')
++    klass = ast.ClassDef(name='Subject', bases=[], keywords=[], body=methods, decorator_list=[])
++    namespace = {'Doorbell': Door, 'asyncio': asyncio, 'logger': SilentLog(), 'os': os}
++    exec(compile(ast.fix_missing_locations(ast.Module(body=[klass], type_ignores=[])),
++                 str(SOURCE / 'mqtt.py'), 'exec'), namespace)
++    return namespace['Subject']
++
++
++class RingSnapshots(unittest.IsolatedAsyncioTestCase):
++    def make(self, *doors):
++        obj = subject_type()()
++        obj._call_states, obj._call_state_versions, obj._snapshot_tasks = {}, {}, {}
++        self.states = {door: [] for door in doors}
++        obj._sensors = {door: {'call': SimpleNamespace(set_state=self.states[door].append)} for door in doors}
++        self.snapshots = []
++
++        async def capture(door):
++            self.snapshots.append(door)
++
++        obj._publish_call_snapshot = capture
++        return obj
++
++    async def finish(self, obj):
++        await asyncio.gather(*obj._snapshot_tasks.values())
++
++    async def test_repeated_polled_ring_once(self):
++        door = Door(); obj = self.make(door)
++        for state in ('idle', 'ring', 'ring', 'ring'):
++            obj._set_call_state(door, state)
++        await self.finish(obj)
++        self.assertEqual(self.snapshots, [door])
++        self.assertEqual(self.states[door], ['idle', 'ring', 'ring', 'ring'])
++
++    async def test_sdk_and_poll_share_ring(self):
++        for sequence in [('ringing', 'ring', 'ringing'), ('ring', 'ringing', 'ring')]:
++            door = Door(); obj = self.make(door)
++            for state in sequence:
++                obj._set_call_state(door, state)
++                await asyncio.sleep(0)
++            await self.finish(obj)
++            self.assertEqual(self.snapshots, [door])
++
++    async def test_next_call_has_new_snapshot(self):
++        door = Door(); obj = self.make(door)
++        obj._set_call_state(door, 'ring'); await self.finish(obj)
++        obj._set_call_state(door, 'idle')
++        obj._set_call_state(door, 'ring'); await self.finish(obj)
++        self.assertEqual(self.snapshots, [door, door])
++
++    async def test_snapshot_is_opt_in(self):
++        for enabled in (False, None):
++            door = Door(enabled=enabled); obj = self.make(door)
++            obj._set_call_state(door, 'ring'); await self.finish(obj)
++            self.assertEqual(self.snapshots, [])
++
++    async def test_two_devices_are_independent(self):
++        a, b = Door('A'), Door('B'); obj = self.make(a, b)
++        obj._set_call_state(a, 'ring'); obj._set_call_state(b, 'ringing')
++        await self.finish(obj)
++        self.assertCountEqual(self.snapshots, [a, b])
++
++    async def test_pending_snapshot_does_not_overlap(self):
++        door = Door(); obj = self.make(door); blocked = asyncio.Event()
++        async def capture(d):
++            self.snapshots.append(d); await blocked.wait()
++        obj._publish_call_snapshot = capture
++        obj._set_call_state(door, 'ring'); await asyncio.sleep(0)
++        obj._set_call_state(door, 'idle'); obj._set_call_state(door, 'ring')
++        blocked.set(); await self.finish(obj)
++        self.assertEqual(self.snapshots, [door])
++
++    async def test_later_call_invalidates_old_timeout(self):
++        door = Door(); obj = self.make(door)
++        old = obj._set_call_state(door, 'ringing')
++        obj._set_call_state(door, 'idle')
++        current = obj._set_call_state(door, 'ringing')
++        await self.finish(obj)
++        self.assertGreater(current, old)
++        self.assertEqual(obj._set_call_state(door, 'ringing'), current)
++        self.assertGreater(obj._set_call_state(door, 'onCall'), current)
++
++    async def test_publish_saved_snapshot(self):
++        door = Door(); obj = self.make(door); published = []
++        transport = SimpleNamespace(_last_snapshot_paths={},
++                                    _publish_snapshot_image=lambda d, path: published.append((d, path)))
++        with tempfile.TemporaryDirectory() as folder:
++            path = Path(folder) / 'synthetic.jpg'; path.write_bytes(b'\xff\xd8synthetic\xff\xd9')
++            door.take_snapshot = lambda: str(path)
++            with patch.dict(sys.modules, {'mqtt_input': SimpleNamespace(get_mqtt_input=lambda: transport)}):
++                await subject_type()._publish_call_snapshot(obj, door)
++            self.assertEqual(published, [(door, str(path))])
++            self.assertEqual(transport._last_snapshot_paths[door], str(path))
++
++    async def test_missing_snapshot_not_published(self):
++        door = Door(); obj = self.make(door); door.take_snapshot = lambda: None
++        transport = SimpleNamespace(_last_snapshot_paths={},
++                                    _publish_snapshot_image=lambda *args: self.fail('Invalid publication'))
++        with patch.dict(sys.modules, {'mqtt_input': SimpleNamespace(get_mqtt_input=lambda: transport)}):
++            await subject_type()._publish_call_snapshot(obj, door)
++        self.assertEqual(transport._last_snapshot_paths, {})
++
++    async def test_capture_error_contained(self):
++        door = Door(); obj = self.make(door)
++        def fail():
++            raise RuntimeError('Device offline')
++        door.take_snapshot = fail
++        with patch.dict(sys.modules, {'mqtt_input': SimpleNamespace(get_mqtt_input=lambda: None)}):
++            await subject_type()._publish_call_snapshot(obj, door)
++
++
++if __name__ == '__main__':
++    unittest.main()

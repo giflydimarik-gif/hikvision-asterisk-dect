@@ -1,0 +1,228 @@
+diff --git a/hikvision-doorbell/src/mqtt.py b/hikvision-doorbell/src/mqtt.py
+index 4f10064..b6b78be 100644
+--- a/hikvision-doorbell/src/mqtt.py
++++ b/hikvision-doorbell/src/mqtt.py
+@@ -216,13 +216,13 @@ class MQTTHandler(EventHandler):
+                     logger.warning("call_state_poll_sec is 0. Automatically setting it to 15 seconds.")
+                     call_state_poll_sec = 15
+ 
+-                async def poll_call_sensor(d=doorbell, c=call_sensor):
++                async def poll_call_sensor(d=doorbell, c=call_sensor, poll_interval=call_state_poll_sec):
+ 
+                     url = "/ISAPI/VideoIntercom/callStatus?format=json"
+                     requestBody = ""
+                     while True:
+                         try:
+-                            logger.debug("Trying to get call status for doorbell: {} every {} sec", d._config.name, call_state_poll_sec)
++                            logger.debug("Trying to get call status for doorbell: {} every {} sec", d._config.name, poll_interval)
+                             response = d._call_isapi("GET", url, requestBody)
+                             data = json.loads(response)
+                             
+@@ -241,7 +241,7 @@ class MQTTHandler(EventHandler):
+                         except Exception as e:
+                             logger.exception("Unexpected error in polling loop: {}", e)
+                             
+-                        await asyncio.sleep(call_state_poll_sec)
++                        await asyncio.sleep(poll_interval)
+                         
+                 loop = asyncio.get_event_loop()
+                 self._call_sensor_tasks[doorbell] = loop.create_task(poll_call_sensor())
+diff --git a/hikvision-doorbell/src/mqtt_input.py b/hikvision-doorbell/src/mqtt_input.py
+index 3999be2..7c0079b 100644
+--- a/hikvision-doorbell/src/mqtt_input.py
++++ b/hikvision-doorbell/src/mqtt_input.py
+@@ -264,7 +264,7 @@ class MQTTInput():
+                     logger.warning("scene_state_poll_sec is 0. Automatically setting it to 15 seconds.")
+                     scene_state_poll_sec = 15
+ 
+-                async def poll_scene_sensor(d: Doorbell, s: Sensor):
++                async def poll_scene_sensor(d: Doorbell, s: Sensor, poll_interval=scene_state_poll_sec):
+                     while True:
+                         try:
+                             xml_string = d._call_isapi("GET", "/ISAPI/VideoIntercom/scene/nowMode")
+@@ -272,13 +272,13 @@ class MQTTInput():
+                             if len(root) > 0 and root[0].text is not None:
+                                 element = root[0].text
+                                 s.set_state(element)
+-                                logger.info("Polling scene sensor every {} sec, found scene: {}", scene_state_poll_sec, element)
++                                logger.info("Polling scene sensor every {} sec, found scene: {}", poll_interval, element)
+                             else:
+                                 raise RuntimeError(f'Unexpected XML response: {xml_string}')
+                         except Exception as e:
+                             logger.error("Error polling scene sensor for {}: {}", d._config.name, e)
+                         
+-                        await asyncio.sleep(scene_state_poll_sec)
++                        await asyncio.sleep(poll_interval)
+                 
+                 loop = asyncio.get_event_loop()
+                 # Store the task using the doorbell as the key
+@@ -305,7 +305,7 @@ class MQTTInput():
+                     logger.warning("alarm_state_poll_sec is 0. Automatically setting it to 15 seconds.")
+                     alarm_state_poll_sec = 15
+ 
+-                async def poll_alarm_sensor(d: Doorbell, a: Sensor):
++                async def poll_alarm_sensor(d: Doorbell, a: Sensor, poll_interval=alarm_state_poll_sec):
+                     while True:
+                         try:
+                             xml_string = d._call_isapi("GET", "/ISAPI/SecurityCP/AlarmControlByPhone")
+@@ -313,13 +313,13 @@ class MQTTInput():
+                             if len(root) > 0 and root[0].text is not None:
+                                 element = root[0].text
+                                 a.set_state(element)
+-                                logger.info("Polling alarm sensor every {} sec, found alarm: {}", alarm_state_poll_sec, element)
++                                logger.info("Polling alarm sensor every {} sec, found alarm: {}", poll_interval, element)
+                             else:
+                                 raise RuntimeError(f'Unexpected XML response: {xml_string}')
+                         except Exception as e:
+                             logger.error("Error polling alarm sensor for {}: {}", d._config.name, e)
+                         
+-                        await asyncio.sleep(alarm_state_poll_sec)
++                        await asyncio.sleep(poll_interval)
+ 
+                 loop = asyncio.get_event_loop()
+                 # Store the task using the doorbell as the key
+diff --git a/hikvision-doorbell/tests/test_poll_intervals.py b/hikvision-doorbell/tests/test_poll_intervals.py
+new file mode 100644
+index 0000000..9c96ec3
+--- /dev/null
++++ b/hikvision-doorbell/tests/test_poll_intervals.py
+@@ -0,0 +1,139 @@
++"""Run the actual nested poll functions without SDK, broker or hardware.
++
++The source functions are compiled unchanged inside their original per-device
++closure shape. This exercises late binding rather than inspecting source text.
++Can also be run directly with python -m unittest, without pytest/conftest imports.
++"""
++import ast
++import asyncio
++import copy
++import json
++import os
++from pathlib import Path
++from types import SimpleNamespace
++import unittest
++import xml.etree.ElementTree as ET
++
++SOURCE = Path(os.environ.get('HIKVISION_SOURCE_ROOT', Path(__file__).resolve().parents[1] / 'src'))
++
++
++class StopAfterOnePoll(BaseException):
++    pass
++
++
++class SilentLog:
++    def __getattr__(self, name):
++        return lambda *args, **kwargs: None
++
++
++class FakeSensor:
++    def __init__(self):
++        self.states = []
++
++    def set_state(self, value):
++        self.states.append(value)
++
++
++class FakeDoorbell:
++    def __init__(self, name, interval):
++        self._config = SimpleNamespace(name=name, call_state_poll=interval,
++                                       scene_state_poll=interval, alarm_state_poll=interval)
++        self.calls = []
++
++    def _call_isapi(self, method, url, *args):
++        self.calls.append((method, url))
++        if 'callStatus' in url:
++            return json.dumps({'CallStatus': {'status': 'ring'}})
++        if '/scene/' in url:
++            return '<SceneNowMode><nowMode>goToBed</nowMode></SceneNowMode>'
++        return '<AlarmControlByPhoneCfg><commandType>closeAlarm</commandType></AlarmControlByPhoneCfg>'
++
++
++def poll_factory(filename, name, interval_variable, sensor_argument):
++    source = ast.parse((SOURCE / filename).read_text())
++    poller = copy.deepcopy(next(n for n in ast.walk(source)
++                              if isinstance(n, ast.AsyncFunctionDef) and n.name == name))
++    wrapper = ast.parse('def build(devices):\n result=[]\n for doorbell in devices:\n  call_sensor=FakeSensor()\n  result.append(None)\n return result\n')
++    loop = wrapper.body[0].body[1]
++    setup = ast.parse(f'{interval_variable}=doorbell._config.call_state_poll\n'
++                      f'if {interval_variable} == 0:\n {interval_variable}=15\n').body
++    if name == 'poll_call_sensor':
++        append = ast.parse('result.append((doorbell, call_sensor, poll_call_sensor()))').body[0]
++    else:
++        append = ast.parse(f'result.append((doorbell, call_sensor, {name}(doorbell, call_sensor)))').body[0]
++    loop.body[1:] = setup + [poller, append]
++    observed = []
++
++    async def stop_sleep(delay):
++        observed.append((asyncio.current_task().get_name(), delay))
++        raise StopAfterOnePoll()
++
++    # The snapshot patch may route updates through the handler; the interval
++    # test still checks the actual coroutine and device, without a real handler.
++    sensor_map = {}
++    handler = SimpleNamespace(_set_call_state=lambda d, state: sensor_map[d].set_state(state))
++    namespace = {'FakeSensor': FakeSensor, 'Doorbell': FakeDoorbell, 'Sensor': FakeSensor,
++                 'SDKError': RuntimeError, 'json': json, 'ET': ET, 'logger': SilentLog(),
++                 'asyncio': SimpleNamespace(sleep=stop_sleep), 'self': handler}
++    exec(compile(ast.fix_missing_locations(wrapper), str(SOURCE / filename), 'exec'), namespace)
++
++    async def exercise(devices):
++        entries = namespace['build'](devices)
++        for doorbell, sensor, _ in entries:
++            sensor_map[doorbell] = sensor
++
++        async def one(coroutine):
++            try:
++                await coroutine
++            except StopAfterOnePoll:
++                pass
++
++        await asyncio.gather(*(asyncio.create_task(one(coro), name=d._config.name)
++                               for d, _, coro in entries))
++        return observed, entries
++
++    return exercise
++
++
++class PollIntervals(unittest.IsolatedAsyncioTestCase):
++    async def check(self, filename, name, variable, sensor, expected_state, reverse=False, zero=False):
++        devices = [FakeDoorbell('panel-A', 0 if zero else 2), FakeDoorbell('panel-B', 11)]
++        if reverse:
++            devices.reverse()
++        observed, entries = await poll_factory(filename, name, variable, sensor)(devices)
++        self.assertEqual(dict(observed), {'panel-A': 15 if zero else 2, 'panel-B': 11})
++        for doorbell, state_sensor, _ in entries:
++            self.assertEqual(state_sensor.states, [expected_state])
++            self.assertEqual(len(doorbell.calls), 1)
++            self.assertEqual(doorbell.calls[0][0], 'GET')
++
++    async def test_call_intervals(self):
++        await self.check('mqtt.py', 'poll_call_sensor', 'call_state_poll_sec', 'c', 'ring')
++
++    async def test_call_reverse_order(self):
++        await self.check('mqtt.py', 'poll_call_sensor', 'call_state_poll_sec', 'c', 'ring', reverse=True)
++
++    async def test_call_zero_keeps_existing_fallback(self):
++        await self.check('mqtt.py', 'poll_call_sensor', 'call_state_poll_sec', 'c', 'ring', zero=True)
++
++    async def test_scene_intervals(self):
++        await self.check('mqtt_input.py', 'poll_scene_sensor', 'scene_state_poll_sec', 's', 'goToBed')
++
++    async def test_scene_reverse_order(self):
++        await self.check('mqtt_input.py', 'poll_scene_sensor', 'scene_state_poll_sec', 's', 'goToBed', reverse=True)
++
++    async def test_scene_zero_keeps_existing_fallback(self):
++        await self.check('mqtt_input.py', 'poll_scene_sensor', 'scene_state_poll_sec', 's', 'goToBed', zero=True)
++
++    async def test_alarm_intervals(self):
++        await self.check('mqtt_input.py', 'poll_alarm_sensor', 'alarm_state_poll_sec', 'a', 'closeAlarm')
++
++    async def test_alarm_reverse_order(self):
++        await self.check('mqtt_input.py', 'poll_alarm_sensor', 'alarm_state_poll_sec', 'a', 'closeAlarm', reverse=True)
++
++    async def test_alarm_zero_keeps_existing_fallback(self):
++        await self.check('mqtt_input.py', 'poll_alarm_sensor', 'alarm_state_poll_sec', 'a', 'closeAlarm', zero=True)
++
++
++if __name__ == '__main__':
++    unittest.main()

@@ -174,3 +174,10 @@ IP-адреса в примерах заменены на placeholders. Пере
 ## Статус
 
 Конфигурация собрана на основе реально работающей установки: вызов, двусторонний звук и открытие калитки с DECT-трубки проверены на практике.
+## Reviewed integration contributions
+
+The original SIP/DECT example above is supplemented by
+[three proposed Hikvision-Addons fixes and regression tests](contrib/hikvision-addons/README.md),
+an [updated ringing blueprint](homeassistant/doorbell-ringing.yaml), and
+[explicit compatibility and verification limits](docs/compatibility.md).
+

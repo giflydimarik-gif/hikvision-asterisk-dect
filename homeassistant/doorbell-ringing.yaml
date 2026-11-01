@@ -1,0 +1,42 @@
+blueprint:
+  name: Hikvision doorbell ringing
+  description: >
+    Version 0.2. Creates a notification for a new incoming call. Select the MQTT
+    Call state sensor. Supports SDK "ringing" and polled ISAPI "ring". Ignores an
+    existing ring restored at startup/reconnect and a change between these two
+    ring spellings. This does not answer a call or operate a door lock.
+
+  domain: automation
+  input:
+    doorbell_sensor:
+      name: Call state sensor
+      description: The sensor named Call state created by Hikvision Doorbell.
+      selector:
+        entity:
+          domain: sensor
+
+variables:
+  doorbell_sensor: !input doorbell_sensor
+
+trigger:
+  - platform: state
+    entity_id: !input doorbell_sensor
+    to: "ringing"
+  - platform: state
+    entity_id: !input doorbell_sensor
+    to: "ring"
+
+condition:
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state not in
+           ['unknown', 'unavailable', 'ring', 'ringing'] }}
+
+action:
+  - service: persistent_notification.create
+    data:
+      title: "Someone is at the door!"
+      message: "A new incoming doorbell call was detected."
+
+mode: single

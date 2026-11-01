@@ -1,0 +1,11 @@
+{
+  "upstream": "pergolafabio/Hikvision-Addons",
+  "base_commit": "fb6abc177f62c480e39a6dbc9dbee997875c76a9",
+  "isolated_tests": 19,
+  "hardware_tests_for_patches": false,
+  "base_sha256": {
+    "blueprints/doorbell-ringing.yaml": "a8c36707093f47769ad644eb04006347b064f77014d5a6aae0abeb9174a3971d",
+    "hikvision-doorbell/src/mqtt.py": "7e424813514f1283aaf9bf64ae06a8b56b8306906decaa0033f0fb3b706ff911",
+    "hikvision-doorbell/src/mqtt_input.py": "9f4173247f8b3e1a19d20a5c7014b185045c78815c00b9aeb67d4197d6e42ee3"
+  }
+}
