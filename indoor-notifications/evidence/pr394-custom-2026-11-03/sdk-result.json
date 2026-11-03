@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "pr": "https://github.com/pergolafabio/Hikvision-Addons/pull/394",
+  "source_commit": "25c48281aebd5199ea64d179606fb9b7a35c7d45",
+  "source_blobs": {
+    "hikvision-doorbell/src/sdk/hcnetsdk.py": "5d255b5c69cba201d036969a93b66349a960f53e",
+    "hikvision-doorbell/src/doorbell.py": "eed1eb7fb8830b41dccd9b502394f41ca6b0d98c",
+    "hikvision-doorbell/src/mqtt_input.py": "d1b1001cae14b9b736a02ae7c6d7561ca93f7294"
+  },
+  "station": {
+    "model": "VDP-H3212W",
+    "firmware": "V2.2.22",
+    "build": "build 230720"
+  },
+  "observed_at": "2026-11-03T08:53:43.707397+00:00",
+  "scope": "unchanged PR structs/method/input callback/send callback; no HA UI click or add-on deployment",
+  "status": "accepted",
+  "wire": {
+    "command": 16008,
+    "size": 1552,
+    "byLevel": 4,
+    "pictures": 1,
+    "picture_bytes": 22524,
+    "picture_sha256": "8657cf8b591616ad0f5186ea9a131fb7bfb897192a1e19c39b09fcfd3d1fb86f",
+    "notice_id": "ha-20261103115342100613",
+    "title": "Home Assistant",
+    "text": "Проверка PR394: свой текст и JPEG. Картинка содержит демонстрационные данные.",
+    "native_calls": 1,
+    "device_accepted": true,
+    "sdk_error": null
+  },
+  "input_edits_sent_nothing": true,
+  "protected_settings_preserved": true,
+  "protected_files_unchanged": true,
+  "old_journals_unchanged": true,
+  "one_new_durable_claim": true,
+  "staged_jpeg_removed": true,
+  "physical_observed": false,
+  "receipt_observed": false,
+  "qa_logs": [
+    "Received notice command for IndoorNoticeBounded (retain=False, dup=False, press=True)",
+    "Notice accepted by SDK for IndoorNoticeBounded; display is not confirmed"
+  ],
+  "local_validation": {
+    "passed": 98,
+    "hardware_skipped": 8,
+    "fatal_flake8": "passed",
+    "scope": "passed",
+    "diff_check": "passed"
+  }
+}
