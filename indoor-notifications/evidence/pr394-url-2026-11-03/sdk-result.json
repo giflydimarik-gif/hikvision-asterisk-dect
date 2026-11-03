@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "pr": "https://github.com/pergolafabio/Hikvision-Addons/pull/394",
+  "source_commit": "52ca49d5f84f26f19cef0a31b6e730e6c9cbeba4",
+  "source_blobs": {
+    "hikvision-doorbell/src/sdk/hcnetsdk.py": "5d255b5c69cba201d036969a93b66349a960f53e",
+    "hikvision-doorbell/src/doorbell.py": "a91d201202fcd33539ae17e26c85b7933a111b0a",
+    "hikvision-doorbell/src/mqtt_input.py": "d1b1001cae14b9b736a02ae7c6d7561ca93f7294"
+  },
+  "station": {
+    "model": "VDP-H3212W",
+    "firmware": "V2.2.22",
+    "build": "build 230720"
+  },
+  "observed_at": "2026-11-03T09:13:23.385172+00:00",
+  "scope": "unchanged PR structs/method/input callback/send callback, actual HTTPS fetch; no HA UI click or add-on deployment",
+  "status": "accepted",
+  "wire": {
+    "command": 16008,
+    "size": 1552,
+    "byLevel": 4,
+    "pictures": 1,
+    "picture_bytes": 22524,
+    "picture_sha256": "8657cf8b591616ad0f5186ea9a131fb7bfb897192a1e19c39b09fcfd3d1fb86f",
+    "notice_id": "ha-20261103121320624870",
+    "title": "Home Assistant",
+    "text": "Проверка PR394: JPEG по HTTPS. Картинка содержит демонстрационные данные.",
+    "native_calls": 1,
+    "device_accepted": true,
+    "sdk_error": null
+  },
+  "image_source": "https://raw.githubusercontent.com/giflydimarik-gif/hikvision-asterisk-dect/6eb287032e6f0db7a08aebfe381fce3fda4df803/indoor-notifications/examples/card-preview.jpg",
+  "image_fetches": [
+    {
+      "source_scheme": "https",
+      "final_scheme": "https",
+      "tls_verification": true,
+      "redirect_count": 0
+    }
+  ],
+  "input_edits_sent_nothing": true,
+  "input_edits_fetched_nothing": true,
+  "protected_settings_preserved": true,
+  "protected_files_unchanged": true,
+  "old_journals_unchanged": true,
+  "one_new_durable_claim": true,
+  "temporary_files_created": 0,
+  "physical_observed": false,
+  "receipt_observed": false,
+  "device_picture_capabilities": {
+    "maxPicNum": 6,
+    "maxSinglePicSize_KB": 512,
+    "observed_at": "2026-11-03T09:04:21.003083+00:00"
+  },
+  "sdk_documented_picture_ceiling_bytes": 524288,
+  "sdk_document": "https://git.pyer.club/kingecg/hksdk/raw/branch/main/CH-HCNetSDKV6.1.9.47_build20221111_linux64/%E5%BC%80%E5%8F%91%E6%96%87%E6%A1%A3/%E8%AE%BE%E5%A4%87%E7%BD%91%E7%BB%9CSDK%E7%BC%96%E7%A8%8B%E6%8C%87%E5%8D%97%EF%BC%88%E5%8F%AF%E8%A7%86%E5%AF%B9%E8%AE%B2%E5%AE%A4%E5%86%85%E6%9C%BA%EF%BC%89.pdf",
+  "qa_logs": [
+    "Received notice command for IndoorNoticeBounded (retain=False, dup=False, press=True)",
+    "Notice accepted by SDK for IndoorNoticeBounded; display is not confirmed"
+  ],
+  "local_validation": {
+    "passed": 103,
+    "hardware_skipped": 8,
+    "fatal_flake8": "passed",
+    "scope": "passed",
+    "diff_check": "passed"
+  }
+}
