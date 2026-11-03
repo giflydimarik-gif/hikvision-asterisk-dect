@@ -21,5 +21,9 @@
     "examples/card-preview.jpg": "8657cf8b591616ad0f5186ea9a131fb7bfb897192a1e19c39b09fcfd3d1fb86f"
   },
   "upstream_branch": "giflydimarik-gif:feat/indoor-notices-20261103",
-  "upstream_commit": "7b21b9614a649901489aa210c811d402708d38bb"
+  "upstream_commit": "7b21b9614a649901489aa210c811d402708d38bb",
+  "upstream_pr": 393,
+  "upstream_pr_state": "draft",
+  "upstream_pr_url": "https://github.com/pergolafabio/Hikvision-Addons/pull/393",
+  "companion_ci_url": "https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266"
 }

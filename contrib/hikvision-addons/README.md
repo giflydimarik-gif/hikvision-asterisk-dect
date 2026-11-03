@@ -12,6 +12,10 @@ an independent bounded MQTT command, durable no-retry journal, HA examples and
 offline tests. Its patch targets a newer exact upstream base and is kept separate
 from the three already-merged fixes.
 
+Review: [draft PR #393](https://github.com/pergolafabio/Hikvision-Addons/pull/393),
+source `7b21b9614a649901489aa210c811d402708d38bb`. Companion package CI passed on
+[`b8829a8`](https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266).
+
 | Patch | Result | Verification |
 | --- | --- | --- |
 | 0001 | Bind the interval separately for each device's call, scene and alarm polling task | Nine regression tests fail on the original source and pass with this patch; distinct intervals, reverse order, existing zero-to-15-second fallback |
