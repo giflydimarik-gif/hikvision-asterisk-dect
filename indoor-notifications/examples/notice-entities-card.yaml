@@ -1,0 +1,11 @@
+# Native MQTT entities from the proposed add-on revision, not input_text helpers.
+# Replace IDs with those shown on your actual indoor device page.
+type: entities
+title: Indoor notices
+entities:
+  - text.indoor_notice_title
+  - text.indoor_notice_text
+  - text.indoor_notice_jpeg
+  - select.indoor_notice_type
+  - button.indoor_send_notice
+  - sensor.indoor_notice_result

@@ -19,11 +19,17 @@ Baselines:
   symlink/FIFO rejection, JPEG normalisation and metadata removal.
 - Compiled local C transport stub exercises the actual private ctypes function
   wrapper and verifies that pre-existing SDK function signatures remain unchanged.
-- Native add-on suite:98 passed,8 skipped with CI=1 (physical-device tests skipped).
-  The35 new tests include the19 shared sender tests and16 adapter tests. Baseline
+- Native add-on suite:122 passed,8 skipped with CI=1 (physical-device tests skipped).
+  The59 new tests include the19 shared sender tests,16 adapter tests and24 HA-input
+  lifecycle cases. Baseline
   SDK load/setup tests use the upstream's existing Linux library, without a device login.
 - Targeted tests cover exact-device routing, busy/unavailable failure, retained
   replay, bad JSON, MQTT reconnect, and ambiguous normalised station names.
+- HA controls use the real pinned discovery classes with a synthetic MQTT client:
+  all six configurations, callback registration, exact-device routing, no-send
+  edits,255-character/UTF-8 limits, missing image, current-draft button token,
+  consume-on-accept, expired/replayed presses, empty restart, timeout no-retry,
+  reconnect state restoration and no message contents in logs.
 - Fatal flake8 selection and canonical path-scope checks pass. Diff reviewed for
   auth, dependencies, callbacks and existing control paths. No production SDK-wide
   typedef/signature/callback changes and no new add-on dependencies.
@@ -37,8 +43,11 @@ Local suite environment: Python3.12, pinned upstream requirements with the old
 optional `ruamel.yaml.clib==0.2.7` omitted (it cannot build here); pure-Python
 ruamel.yaml remains at the upstream version. Repository requirements are unchanged.
 The upstream suite emits existing destructor/deprecation warnings under this
-environment. No Docker-image build, ARM execution, real broker-reconnect test or
-hardware run of this new adapter was performed.
+environment. The original7b21b9614a64 revision passed all five GitHub CI jobs,
+including image builds/startup tests on amd64/aarch64:
+[original CI](https://github.com/pergolafabio/Hikvision-Addons/actions/runs/41573321635).
+That is not acceptance of this revised entity workflow. Real broker reconnect,
+live HA rendering and hardware validation of the controls remain pending.
 
 ## Evidence limits and operator contract
 

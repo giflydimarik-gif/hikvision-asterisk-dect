@@ -13,7 +13,11 @@ offline tests. Its patch targets a newer exact upstream base and is kept separat
 from the three already-merged fixes.
 
 Review: [draft PR #393](https://github.com/pergolafabio/Hikvision-Addons/pull/393),
-source `7b21b9614a649901489aa210c811d402708d38bb`. Companion package CI passed on
+revised source `67c12e36b860e1fc617ec2566a5359b99689afa1`, adding HA draft fields,
+type selector, send button and result sensor following maintainer feedback.
+The revision passes122 tests locally, including24 new discovery/control cases;
+live HA rendering and physical control acceptance remain pending.
+The original companion package CI passed on
 [`b8829a8`](https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266).
 
 | Patch | Result | Verification |

@@ -1,12 +1,55 @@
 diff --git a/doorbell/DOCS.md b/doorbell/DOCS.md
-index e370611..aa5617d 100644
+index e370611..5b28c6e 100644
 --- a/doorbell/DOCS.md
 +++ b/doorbell/DOCS.md
-@@ -161,6 +161,85 @@ For each of your doorbells, the following entities are available:
+@@ -161,6 +161,128 @@ For each of your doorbells, the following entities are available:
  
  ## Sending commands to the doorbells
  
-+### Indoor text/JPEG notices (proposed command)
++### Indoor text/JPEG notices
++
++The indoor station's built-in notice function can display text and an optional
++JPEG, for example "Gate left open" with a snapshot. Like Broadcast, this uses
++discovered Home Assistant inputs and a button on the existing device page.
++
++#### Home Assistant controls
++
++| Control | Purpose |
++|---|---|
++| `Notice title` (text) | Heading, up to63 UTF-8 bytes |
++| `Notice text` (text) | Message, up to255 characters in HA's text entity |
++| `Notice JPEG` (text) | Optional normalised filename, e.g. `gate.jpg`; blank means text only |
++| `Notice type` (select) | `notice` or `alarm`, default `notice` |
++| `Send notice` (button) | Send the current draft once |
++| `Notice result` (sensor) | Last attempt status, with ID/reason/SDK-code attributes |
++
++Fill in title and text, optionally enter a JPEG filename, select the type, then
++press **Send notice**. Editing a field never sends anything. After acceptance,
++the message text clears; explicitly fill it again for another message. A missing
++or invalid picture rejects the attempt and preserves the draft. Clear its filename
++to intentionally send text only. Alarm requests the built-in sound at the current
++volume; it does not arm the security system or change quiet hours.
++
++Drafts expire five minutes after the last valid edit. Editing again prepares a
++fresh draft. Empty/invalid fields, retained/replayed commands and old button
++presses are rejected. Each discovery button payload identifies the current draft:
++if `stale_draft_press_rejected` appears just after an edit, wait for HA to receive
++the updated discovery state and press again. Reconnect restores draft field states
++without sending; add-on restart starts with empty title/text. Unknown delivery
++still blocks new attempts until reviewed, including after restart.
++
++Draft values are in add-on memory; their MQTT state echoes are non-retained and
++the new callbacks do not log message contents. Home Assistant may retain entity
++history according to its recorder configuration. The HA text field uses255
++characters so even four-byte UTF-8 characters fit within the native1023-byte
++limit. The advanced atomic JSON command below retains the full native byte limit
++and is preferable for automations that need one consistent payload.
++
++These controls are proposed in this PR and are not part of stable3.0.34. Their
++discovery/callback flow is tested with the actual discovery library and synthetic
++MQTT/SDK transports. Live HA rendering and hardware validation remain pending.
++
++#### Atomic MQTT command (advanced)
 +
 +On configured **indoor** devices, publish non-retained JSON to
 +`hikvision/<normalised_name>/notice/set`. The name follows the existing add-on
@@ -505,6 +548,198 @@ index 0000000..1b7e752
 +                raise NoticeError("unreviewed_unknown_not_found")
 +        finally:
 +            db.close()
+diff --git a/hikvision-doorbell/src/indoor_notice_inputs.py b/hikvision-doorbell/src/indoor_notice_inputs.py
+new file mode 100644
+index 0000000..eca22a0
+--- /dev/null
++++ b/hikvision-doorbell/src/indoor_notice_inputs.py
+@@ -0,0 +1,186 @@
++"""HA notice controls; editing a draft never sends a device command.
++
++Draft text stays in memory. MQTT state echoes are non-retained and bypass the
++discovery library's value-logging helpers. HA itself may record entity history.
++"""
++import json
++import threading
++import time
++import uuid
++
++from ha_mqtt_discoverable import Settings
++from ha_mqtt_discoverable.sensors import Button, ButtonInfo, Text, TextInfo, Select, SelectInfo, Sensor, SensorInfo
++from indoor_notice import NoticeError, parse_request
++
++
++class NoticeSendButton(Button):
++    """Restore non-retained draft states when the shared client reconnects."""
++
++    def set_availability(self, available):
++        super().set_availability(available)
++        if available and hasattr(self, "notice_inputs"):
++            self.notice_inputs.refresh()
++
++
++class NoticeInputs:
++    """One current draft per exact indoor device; no persistent message content."""
++
++    TEXT_FIELDS = {"title": ("Notice title", 63), "text": ("Notice text", 255), "picture": ("Notice JPEG", 68)}
++
++    def __init__(self, mqtt_settings, device, name, doorbell, send, report, register, clock=time.time):
++        self.client = mqtt_settings.client
++        self.clock, self.send, self.report = clock, send, report
++        self.lock = threading.RLock()
++        self.fields = {"title": "", "text": "", "picture": "", "level": "notice"}
++        self.invalid_fields = set()
++        self.created_at = self.clock()
++        self.notice_id = self._new_id()
++        self.entities = {}
++        self.last_result = {"status": "idle"}
++        self.ready = False
++        for key, (label, maximum) in self.TEXT_FIELDS.items():
++            info = TextInfo(name=label, unique_id=f"{name}_notice_{key}", device=device,
++                            icon="mdi:image" if key == "picture" else "mdi:format-text",
++                            min=0, max=maximum, retain=False)
++            settings = Settings(mqtt=mqtt_settings, entity=info, manual_availability=True, user_data=doorbell)
++
++            def edit(client, userdata, message, field=key):
++                self.edit(field, message)
++
++            entity = Text(settings, edit)
++            self.entities[key] = entity
++            entity.set_availability(True)
++            register(entity)
++
++        info = SelectInfo(name="Notice type", unique_id=f"{name}_notice_level", device=device,
++                          icon="mdi:message-alert", options=["notice", "alarm"], retain=False)
++        settings = Settings(mqtt=mqtt_settings, entity=info, manual_availability=True, user_data=doorbell)
++        entity = Select(settings, lambda client, userdata, message: self.edit("level", message))
++        self.entities["level"] = entity
++        entity.set_availability(True)
++        register(entity)
++
++        info = SensorInfo(name="Notice result", unique_id=f"{name}_notice_result", device=device, icon="mdi:message-check")
++        settings = Settings(mqtt=mqtt_settings, entity=info, manual_availability=True, user_data=doorbell)
++        self.result = Sensor(settings)
++        self.result.set_availability(True)
++        register(self.result)
++
++        info = ButtonInfo(name="Send notice", unique_id=f"{name}_send_notice", device=device,
++                          icon="mdi:message-arrow-right", payload_press=self._press_payload(), retain=False)
++        settings = Settings(mqtt=mqtt_settings, entity=info, manual_availability=True, user_data=doorbell)
++        self.button = NoticeSendButton(settings, lambda client, userdata, message: self.press(message))
++        self.button.notice_inputs = self
++        self.ready = True
++        self.button.set_availability(True)
++        register(self.button)
++
++    @staticmethod
++    def _new_id():
++        return "ha-" + uuid.uuid4().hex[:28]
++
++    def _press_payload(self):
++        return "SEND " + self.notice_id
++
++    def _payload(self, validation=False):
++        data = {"id": self.notice_id, "title": self.fields["title"], "text": self.fields["text"],
++                "level": self.fields["level"], "expires_at": self.created_at + 300}
++        if validation:
++            # Empty fields are valid while editing, but never while sending.
++            data["title"] = data["title"] or "Notice"
++            data["text"] = data["text"] or "Draft"
++        if self.fields["picture"]:
++            data["picture"] = self.fields["picture"]
++        return json.dumps(data, ensure_ascii=True).encode("utf-8")
++
++    def _new_revision(self):
++        self.notice_id = self._new_id()
++        self.created_at = self.clock()
++        # HA's button publishes the current discovery payload. A stale queued
++        # press carries an old revision and cannot send a newer draft.
++        self.button._entity.payload_press = self._press_payload()
++        self.button.write_config()
++
++    def _failure(self, reason):
++        result = {"status": "not_sent", "reason": reason, "send_attempted": False}
++        self.report(result)
++        return result
++
++    def edit(self, field, message):
++        with self.lock:
++            if not self.ready or field not in self.fields:
++                return self._failure("draft_not_ready")
++            if message.retain or getattr(message, "dup", False):
++                return self._failure("replayed_edit_rejected")
++            try:
++                maximum = self.TEXT_FIELDS.get(field, (None, 8))[1]
++                if type(message.payload) is not bytes or len(message.payload) > maximum * 4:
++                    raise NoticeError("field_size_invalid")
++                value = message.payload.decode("utf-8", "strict")
++                if len(value) > maximum:
++                    raise NoticeError("field_size_invalid")
++                previous = self.fields[field]
++                self.fields[field] = value
++                try:
++                    parse_request(self._payload(validation=True))
++                except (ValueError, UnicodeError, TypeError):
++                    self.fields[field] = previous
++                    raise NoticeError("draft_field_invalid") from None
++            except (ValueError, UnicodeError, TypeError):
++                self.invalid_fields.add(field)
++                return self._failure("draft_field_invalid")
++            self.invalid_fields.discard(field)
++            self._new_revision()
++            self._publish_field(field)
++            return {"status": "draft_updated", "send_attempted": False}
++
++    def press(self, message):
++        with self.lock:
++            if not self.ready:
++                return self._failure("draft_not_ready")
++            if message.retain or getattr(message, "dup", False):
++                return self._failure("replayed_press_rejected")
++            if message.payload != self._press_payload().encode("ascii"):
++                return self._failure("stale_draft_press_rejected")
++            if self.invalid_fields:
++                return self._failure("draft_field_invalid")
++            if not self.created_at <= self.clock() < self.created_at + 300:
++                return self._failure("draft_expired")
++            try:
++                payload = self._payload()
++                parse_request(payload)
++            except (ValueError, UnicodeError, TypeError):
++                return self._failure("draft_incomplete")
++            result = self.send(payload)
++            if result.get("status") == "accepted":
++                # A successful press consumes the text; a new message requires
++                # an explicit edit. The durable sender retains the old ID too.
++                self.fields["text"] = ""
++                self._new_revision()
++                self._publish_field("text")
++            return result
++
++    def _publish_field(self, field):
++        entity = self.entities[field]
++        if not entity.wrote_configuration:
++            entity.write_config()
++        # Text.set_text and Discoverable._update_state log private values.
++        self.client.publish(entity.state_topic, self.fields[field], retain=False)
++
++    def publish_result(self, result):
++        with self.lock:
++            self.last_result = {key: value for key, value in result.items()
++                                if key in {"status", "id", "reason", "send_attempted", "device_accepted", "sdk_error", "duplicate"}}
++            self._publish_result()
++
++    def _publish_result(self):
++        if not self.result.wrote_configuration:
++            self.result.write_config()
++        self.client.publish(self.result.state_topic, self.last_result["status"], retain=False)
++        self.client.publish(self.result.attributes_topic, json.dumps(self.last_result), retain=False)
++
++    def refresh(self):
++        with self.lock:
++            for field in self.fields:
++                self._publish_field(field)
++            self._publish_result()
 diff --git a/hikvision-doorbell/src/mqtt.py b/hikvision-doorbell/src/mqtt.py
 index 24ee874..aec9bff 100644
 --- a/hikvision-doorbell/src/mqtt.py
@@ -541,7 +776,7 @@ index 24ee874..aec9bff 100644
 \ No newline at end of file
 +    return _current_mqtt_handler
 diff --git a/hikvision-doorbell/src/mqtt_input.py b/hikvision-doorbell/src/mqtt_input.py
-index 7c0079b..cd8d6ef 100644
+index 7c0079b..4db2cd0 100644
 --- a/hikvision-doorbell/src/mqtt_input.py
 +++ b/hikvision-doorbell/src/mqtt_input.py
 @@ -4,6 +4,7 @@ import os
@@ -552,25 +787,27 @@ index 7c0079b..cd8d6ef 100644
  from typing import Any, cast
  from config import AppConfig
  from pathlib import Path
-@@ -11,7 +12,8 @@ from doorbell import DeviceType, Doorbell, Registry, sanitize_doorbell_name
+@@ -11,7 +12,9 @@ from doorbell import DeviceType, Doorbell, Registry, sanitize_doorbell_name
  from ha_mqtt_discoverable import Settings, Discoverable
  from ha_mqtt_discoverable.sensors import Button, ButtonInfo, Text, TextInfo, SensorInfo, Sensor, ImageInfo, Image, SelectInfo, Select, SwitchInfo
  from loguru import logger
 -from mqtt import extract_device_info, _register_reconnect_handler, get_shared_client
 +from mqtt import extract_device_info, _register_reconnect_handler, _register_command_topic, get_shared_client
 +from indoor_notice import NoticeError, NoticeService
++from indoor_notice_inputs import NoticeInputs
  from paho.mqtt.client import MQTTMessage
  from sdk.hcnetsdk import (NET_DVR_JPEGPARA, NET_DVR_DEVICEINFO_V30)
  import xml.etree.ElementTree as ET
-@@ -37,6 +39,7 @@ class MQTTInput():
+@@ -37,6 +40,8 @@ class MQTTInput():
          self._doorbells = doorbells
          logger.debug("Setting up MQTTInput")
          shared_client = get_shared_client(config)
 +        self._notice_service = NoticeService(DATA_DIR / "notice-journal", Path("/media/hikvision-notices"))
++        self._notice_inputs = {}
          mqtt_settings = Settings.MQTT(
              host=config.host,
              port=config.port,
-@@ -50,6 +53,9 @@ class MQTTInput():
+@@ -50,6 +55,9 @@ class MQTTInput():
          self._scene_sensor_tasks = {}
          self._alarm_sensor_tasks = {}
  
@@ -580,7 +817,7 @@ index 7c0079b..cd8d6ef 100644
          for doorbell in doorbells.values():
              self._sensors[doorbell] = {}
  
-@@ -58,6 +64,16 @@ class MQTTInput():
+@@ -58,6 +66,21 @@ class MQTTInput():
  
              # Remove spaces and - from doorbell name
              sanitized_doorbell_name = sanitize_doorbell_name(doorbell_name)
@@ -592,31 +829,45 @@ index 7c0079b..cd8d6ef 100644
 +                    self._notice_callback(client, device, message)
 +
 +                _register_command_topic(shared_client, topic, notice_callback)
++                self._notice_inputs[doorbell] = NoticeInputs(
++                    mqtt_settings, device, sanitized_doorbell_name, doorbell,
++                    send=lambda payload, d=doorbell: self._send_notice_payload(shared_client, d, payload),
++                    report=lambda result, d=doorbell: self._publish_notice_result(shared_client, d, result),
++                    register=_register_reconnect_handler)
 +            elif doorbell._type == DeviceType.INDOOR:
 +                logger.warning("Notice topic is empty or ambiguous; use unique configured indoor station names")
              
              ###########
              # Reboot button
-@@ -467,6 +483,24 @@ class MQTTInput():
+@@ -467,6 +490,33 @@ class MQTTInput():
                  _register_reconnect_handler(broadcast_audio_path_text)
                  self._sensors[doorbell]['broadcast_audio_path'] = broadcast_audio_path_text
  
 +    def _notice_callback(self, client, doorbell: Doorbell, message: MQTTMessage):
 +        # This callback is bound to the exact device at registration; it never
 +        # uses the legacy fuzzy topic/name resolver for a notice destination.
-+        topic = f"hikvision/{sanitize_doorbell_name(doorbell._config.name)}/notice"
-+        if message.retain:
++        return self._send_notice_payload(client, doorbell, message.payload, message.retain)
++
++    def _send_notice_payload(self, client, doorbell, payload, retained=False):
++        if retained:
 +            result = {"status": "not_sent", "reason": "retained_command_rejected", "send_attempted": False}
 +        else:
 +            try:
-+                result = doorbell.send_indoor_notice(message.payload, self._notice_service)
++                result = doorbell.send_indoor_notice(payload, self._notice_service)
 +            except NoticeError as error:
 +                result = {"status": "not_sent", "reason": str(error), "send_attempted": False}
 +            except (SDKError, OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
 +                result = {"status": "not_sent", "reason": "notice_unavailable", "send_attempted": False}
++        return self._publish_notice_result(client, doorbell, result)
++
++    def _publish_notice_result(self, client, doorbell, result):
++        topic = f"hikvision/{sanitize_doorbell_name(doorbell._config.name)}/notice"
 +        # Message content, paths, serials and exception strings are not logged.
 +        logger.info("Indoor notice result: {}", result["status"])
 +        client.publish(topic + "/result", json.dumps(result), qos=1, retain=False)
++        inputs = getattr(self, "_notice_inputs", {}).get(doorbell)
++        if inputs:
++            inputs.publish_result(result)
 +        return result
 +
      def _load_persistent_data(self):
@@ -997,3 +1248,275 @@ index 0000000..b2fc898
 +    register = mocker.patch("mqtt_input._register_command_topic")
 +    MQTTInput(AppConfig.MQTT(host="example.invalid"), registry)
 +    register.assert_not_called()
+diff --git a/hikvision-doorbell/tests/test_notice_inputs.py b/hikvision-doorbell/tests/test_notice_inputs.py
+new file mode 100644
+index 0000000..4be8da6
+--- /dev/null
++++ b/hikvision-doorbell/tests/test_notice_inputs.py
+@@ -0,0 +1,266 @@
++"""Real discovery classes, synthetic MQTT callbacks, no broker or device."""
++import json
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++import paho.mqtt.client as mqtt_client
++from ha_mqtt_discoverable import Settings, DeviceInfo
++
++from config import AppConfig
++from doorbell import Doorbell, DeviceType, Registry
++from indoor_notice import NoticeService
++from indoor_notice_inputs import NoticeInputs
++from mqtt_input import MQTTInput
++import mqtt
++
++
++def message(value, **changes):
++    return SimpleNamespace(payload=value.encode() if isinstance(value, str) else value,
++                           retain=changes.get("retain", False), dup=changes.get("dup", False))
++
++
++@pytest.fixture
++def controls(tmp_path):
++    client = Mock(spec=mqtt_client.Client)
++    client.is_connected.return_value = True
++    client.subscribe.return_value = (mqtt_client.MQTT_ERR_SUCCESS, 1)
++    settings = Settings.MQTT(host="example.invalid", client=client)
++    callbacks, registered = {}, []
++    client.message_callback_add.side_effect = lambda topic, callback: callbacks.__setitem__(topic, callback)
++    clock = [1793674800.0]
++    sdk = Mock()
++    sdk.NET_DVR_RemoteControl.return_value = 1
++    station = Doorbell(0, AppConfig.Doorbell(name="Indoor", ip="example.invalid", username="x", password="x"), sdk)
++    station._type, station.user_id = DeviceType.INDOOR, 0
++    station._device_info = SimpleNamespace(serialNumber=lambda: "synthetic-device")
++    station._call_isapi = Mock(return_value='{"CallStatus":{"status":"idle"}}')
++    service = NoticeService(tmp_path / "journal", tmp_path / "pictures", lambda: clock[0])
++    reader = MQTTInput.__new__(MQTTInput)
++    reader._notice_service, reader._notice_inputs = service, {}
++    inputs = NoticeInputs(settings, DeviceInfo(name="Indoor", identifiers="synthetic-device"), "indoor", station,
++                          send=lambda payload: reader._send_notice_payload(client, station, payload),
++                          report=lambda result: reader._publish_notice_result(client, station, result),
++                          register=registered.append, clock=lambda: clock[0])
++    reader._notice_inputs[station] = inputs
++    return SimpleNamespace(inputs=inputs, client=client, callbacks=callbacks, registered=registered,
++                           clock=clock, station=station, sdk=sdk, service=service, reader=reader, root=tmp_path)
++
++
++def edit(controls, field, value, **flags):
++    entity = controls.inputs.entities[field]
++    controls.callbacks[entity._command_topic](controls.client, controls.station, message(value, **flags))
++
++
++def press(controls, payload=None, **flags):
++    return controls.inputs.press(message(payload or controls.inputs.button._entity.payload_press, **flags))
++
++
++def fill(controls, title="Проверка", text='Сообщение с "кавычками"\nи переносом'):
++    edit(controls, "title", title)
++    edit(controls, "text", text)
++
++
++def test_discovery_controls_are_grouped_and_have_safe_command_settings(controls):
++    assert len(controls.registered) == 6
++    configs = [entity.generate_config() for entity in controls.registered]
++    assert {c["name"] for c in configs} == {"Notice title", "Notice text", "Notice JPEG", "Notice type", "Send notice", "Notice result"}
++    assert all(c["device"]["identifiers"] == "synthetic-device" for c in configs)
++    assert len({c["unique_id"] for c in configs}) == 6
++    assert len({c["command_topic"] for c in configs if "command_topic" in c}) == 5
++    assert all(c["retain"] is False for c in configs if "command_topic" in c)
++    assert controls.inputs.entities["text"].generate_config()["max"] == 255
++    assert controls.inputs.entities["level"].generate_config()["options"] == ["notice", "alarm"]
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_field_callbacks_echo_without_sending_or_logging_text(controls):
++    from loguru import logger
++    messages = []
++    handler = logger.add(lambda event: messages.append(str(event)))
++    try:
++        controls.client.publish.reset_mock()
++        fill(controls, title="Private marker", text="PRIVATE-BODY-5b7e")
++        edit(controls, "picture", "private-camera.jpg")
++        assert controls.inputs.fields["text"] == "PRIVATE-BODY-5b7e"
++        assert controls.inputs.fields["picture"] == "private-camera.jpg"
++        writes = controls.client.publish.call_args_list
++        assert any(call.args[:2] == (controls.inputs.entities["text"].state_topic, "PRIVATE-BODY-5b7e") and call.kwargs["retain"] is False for call in writes)
++        assert not any("PRIVATE-BODY-5b7e" in str(log) or "private-camera.jpg" in str(log) for log in messages)
++    finally:
++        logger.remove(handler)
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++    assert not (controls.root / "journal").exists()
++
++
++def test_button_sends_once_and_consumes_text(controls):
++    fill(controls)
++    token = controls.inputs.button._entity.payload_press
++    result = press(controls, token)
++    assert result["status"] == "accepted"
++    assert controls.inputs.fields["text"] == ""
++    assert press(controls, token)["reason"] == "stale_draft_press_rejected"
++    assert press(controls)["reason"] == "draft_incomplete"
++    controls.sdk.NET_DVR_RemoteControl.assert_called_once()
++    assert controls.inputs.last_result["send_attempted"] is False
++
++
++def test_actual_button_topic_callback_uses_current_discovery_payload(controls):
++    fill(controls)
++    button = controls.inputs.button
++    controls.callbacks[button._command_topic](controls.client, controls.station, message(button.generate_config()["payload_press"]))
++    controls.sdk.NET_DVR_RemoteControl.assert_called_once()
++
++
++def test_edit_invalidates_previous_button_token(controls):
++    fill(controls)
++    token = controls.inputs.button._entity.payload_press
++    edit(controls, "text", "Новый текст")
++    assert press(controls, token)["status"] == "not_sent"
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++    assert press(controls)["status"] == "accepted"
++
++
++@pytest.mark.parametrize("field,value", [("title", "я" * 32), ("text", "x" * 256), ("text", "bad\x00"),
++                                         ("picture", "../secret.jpg"), ("picture", "/tmp/a.jpg"),
++                                         ("picture", "https://example.invalid/a.jpg"), ("level", "other"), ("text", b"\xff")])
++def test_bad_edits_block_old_draft_until_corrected(controls, field, value):
++    fill(controls)
++    previous = controls.inputs.fields[field]
++    edit(controls, field, value)
++    assert controls.inputs.fields[field] == previous
++    assert press(controls)["reason"] == "draft_field_invalid"
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++    edit(controls, field, previous)
++    if field == "picture":
++        assert controls.inputs.fields[field] == ""
++    assert press(controls)["status"] == "accepted"
++
++
++@pytest.mark.parametrize("flag", ["retain", "dup"])
++def test_replayed_fields_and_button_commands_never_send(controls, flag):
++    fill(controls)
++    token = controls.inputs.button._entity.payload_press
++    old = dict(controls.inputs.fields)
++    edit(controls, "text", "Replay", **{flag: True})
++    assert controls.inputs.fields == old
++    assert press(controls, token, **{flag: True})["status"] == "not_sent"
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_expired_draft_never_sends_but_explicit_edit_prepares_new_request(controls):
++    fill(controls)
++    controls.clock[0] += 300
++    assert press(controls)["reason"] == "draft_expired"
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++    edit(controls, "text", controls.inputs.fields["text"])
++    assert press(controls)["status"] == "accepted"
++
++
++def test_timeout_and_restart_keep_no_retry_barrier(controls):
++    fill(controls)
++    controls.sdk.NET_DVR_RemoteControl.return_value = 0
++    controls.sdk.NET_DVR_GetLastError.return_value = 10
++    token = controls.inputs.button._entity.payload_press
++    assert press(controls, token)["status"] == "unknown"
++    assert press(controls, token)["duplicate"] is True
++    controls.sdk.NET_DVR_RemoteControl.assert_called_once()
++    edit(controls, "text", "New message")
++    controls.clock[0] += 61
++    assert press(controls)["reason"] == "previous_attempt_needs_review"
++    controls.sdk.NET_DVR_RemoteControl.assert_called_once()
++    # A fresh UI controller creates an empty draft with a new press token.
++    new = NoticeInputs(controls.inputs.button._settings.mqtt, DeviceInfo(name="Indoor", identifiers="synthetic-device"),
++                       "indoor", controls.station, send=Mock(), report=Mock(), register=Mock(), clock=lambda: controls.clock[0])
++    assert new.fields["text"] == "" and new.fields["title"] == ""
++    assert new.press(message(token))["reason"] == "stale_draft_press_rejected"
++    new.send.assert_not_called()
++
++
++def test_reconnect_restores_nonretained_states_and_nonce_without_sending(controls, monkeypatch):
++    fill(controls)
++    token = controls.inputs.button._entity.payload_press
++    monkeypatch.setattr(mqtt, "_registered_entities", {})
++    monkeypatch.setattr(mqtt, "_command_topics", {})
++    for entity in controls.registered:
++        mqtt._register_reconnect_handler(entity)
++    controls.client.publish.reset_mock()
++    controls.client.subscribe.reset_mock()
++    mqtt._on_connect(controls.client, None)
++    assert controls.inputs.button._entity.payload_press == token
++    assert controls.inputs.fields["text"].startswith("Сообщение")
++    assert any(call.args[:2] == (controls.inputs.entities["text"].state_topic, controls.inputs.fields["text"]) and call.kwargs["retain"] is False
++               for call in controls.client.publish.call_args_list)
++    assert controls.client.subscribe.call_count == 5
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_alarm_selection_and_new_explicit_message_respect_rate_limit(controls):
++    import ctypes as C
++    from indoor_notice import NoticeData
++    levels = []
++    controls.sdk.NET_DVR_RemoteControl.side_effect = lambda user, cmd, ptr, size: levels.append(C.cast(ptr, C.POINTER(NoticeData)).contents.byLevel) or 1
++    fill(controls)
++    edit(controls, "level", "alarm")
++    assert press(controls)["status"] == "accepted"
++    edit(controls, "text", "Another explicit message")
++    assert press(controls)["reason"] == "rate_limited"
++    controls.clock[0] += 60
++    assert press(controls)["status"] == "accepted"
++    assert levels == [3, 3]
++
++
++def test_full_mqtt_input_creates_controls_only_for_unambiguous_indoor(controls, mocker):
++    from mqtt_input import MQTTInput
++    registry = Registry()
++    registry[0] = controls.station
++    mocker.patch("mqtt_input.get_shared_client", return_value=controls.client)
++    mocker.patch("mqtt_input.extract_device_info", return_value=DeviceInfo(name="Indoor", identifiers="synthetic-device"))
++    for name in ("Button", "Text", "Image", "Select", "Sensor", "_register_reconnect_handler"):
++        mocker.patch("mqtt_input." + name)
++    reader = MQTTInput(AppConfig.MQTT(host="example.invalid"), registry)
++    assert controls.station in reader._notice_inputs
++    assert len(reader._notice_inputs[controls.station].entities) == 4
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_missing_picture_preserves_draft_and_clear_is_explicit(controls):
++    fill(controls)
++    edit(controls, "picture", "missing.jpg")
++    assert press(controls)["status"] == "not_sent"
++    assert controls.inputs.fields["text"]
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++    edit(controls, "picture", "")
++    assert press(controls)["status"] == "accepted"
++
++
++def test_ha_character_limit_also_fits_native_utf8_limit(controls):
++    fill(controls, title="я" * 31 + "x", text="🙂" * 255)
++    assert len(controls.inputs.fields["text"].encode()) == 1020
++    assert press(controls)["status"] == "accepted"
++
++
++def test_setup_callback_cannot_send_before_controls_are_ready(controls):
++    controls.inputs.ready = False
++    assert press(controls)["reason"] == "draft_not_ready"
++    edit(controls, "text", "Early command")
++    assert controls.inputs.fields["text"] == ""
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_two_controllers_keep_exact_device_binding_despite_userdata(controls):
++    settings = controls.inputs.button._settings.mqtt
++    other_device = Mock()
++    other_send, other_report = Mock(return_value={"status": "accepted"}), Mock()
++    other = NoticeInputs(settings, DeviceInfo(name="Second indoor", identifiers="second-synthetic"),
++                         "secondindoor", other_device, send=other_send, report=other_report, register=Mock(),
++                         clock=lambda: controls.clock[0])
++    for field, value in (("title", "Other title"), ("text", "Other body"), ("picture", "one.jpg")):
++        callback = controls.callbacks[other.entities[field]._command_topic]
++        callback(controls.client, controls.station, message(value))
++    callback = controls.callbacks[other.button._command_topic]
++    callback(controls.client, controls.station, message(other.button._entity.payload_press))
++    other_send.assert_called_once()
++    assert json.loads(other_send.call_args.args[0])["picture"] == "one.jpg"
++    assert controls.inputs.fields["text"] == ""
++    controls.sdk.NET_DVR_RemoteControl.assert_not_called()
