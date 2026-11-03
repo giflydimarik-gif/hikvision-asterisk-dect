@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "pr": "https://github.com/pergolafabio/Hikvision-Addons/pull/394",
+  "source_commit": "d17398ec6216c144dc1b49a22aad712d45a1c640",
+  "station": {
+    "model": "VDP-H3212W",
+    "firmware": "V2.2.22",
+    "build": "build 230720"
+  },
+  "sdk_observation": {
+    "observed_at_utc": "2026-11-03T08:09:58.729330+00:00",
+    "callback": {
+      "retain": false,
+      "dup": false,
+      "press": true
+    },
+    "command": 16008,
+    "buffer_bytes": 1552,
+    "notice_level": 4,
+    "pictures": 0,
+    "native_calls": 1,
+    "native_notice_id": "ha-test-20261103110956158722",
+    "status": "accepted",
+    "device_accepted": true,
+    "sdk_error": null,
+    "protected_settings_preserved": true,
+    "logs": [
+      "Received test notice command for IndoorNoticeBounded (retain=False, dup=False, press=True)",
+      "Test notice accepted by SDK for IndoorNoticeBounded; display is not confirmed"
+    ]
+  },
+  "visual_observation": {
+    "source": "two owner-supplied photographs",
+    "title": "Home Assistant test",
+    "body": "Test notice from Home Assistant.",
+    "main_screen_banner_visible": true,
+    "opened_message_text_visible": true,
+    "device_displayed_record_time": "2026-11-03 11:11:29",
+    "clocks_compared": false,
+    "latency_measured": false,
+    "assets": [
+      {
+        "name": "notice-banner.png",
+        "size": [
+          859,
+          80
+        ],
+        "bytes": 84530,
+        "sha256": "e17082c2356c9076efff334eda8d46572dc7e25d85907fda08d787e6b0e3ee0f",
+        "crop_only": true,
+        "metadata_removed": true
+      },
+      {
+        "name": "notice-opened.png",
+        "size": [
+          680,
+          445
+        ],
+        "bytes": 408997,
+        "sha256": "ecbd2cd720dc234ea0c3fb3f4f8ce5fbba37428f6da4ac8ffb55735b61435d6c",
+        "crop_only": true,
+        "metadata_removed": true
+      }
+    ]
+  },
+  "validation_scope": {
+    "unchanged_pr_structs_method_callback": true,
+    "real_station_used": true,
+    "full_fork_deployed": false,
+    "live_ha_entity_click_tested": false,
+    "receipt_callback_confirmed": false,
+    "sound_tested": false,
+    "screen_wake_tested": false
+  },
+  "image_processing": "Crops of the owner's photographs only; unrelated notification history excluded; metadata removed; decoded RGB crop pixels preserved."
+}
