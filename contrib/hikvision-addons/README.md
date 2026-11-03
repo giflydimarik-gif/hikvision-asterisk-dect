@@ -7,18 +7,18 @@ merged on2026-11-02. These archived patches target the old base above; do not
 reapply them blindly to current upstream. A merge into main does not establish
 that a new stable image has been released or installed on our live intercom.
 
-The next contribution is [indoor text/JPEG notices](../../indoor-notifications/README.md):
-an independent bounded MQTT command, durable no-retry journal, HA examples and
-offline tests. Its patch targets a newer exact upstream base and is kept separate
-from the three already-merged fixes.
+The current notice contribution is [PR #394](https://github.com/pergolafabio/Hikvision-Addons/pull/394),
+ready for review at `fb45f64265bb9839e60bc1e4d23d3bc5de284993`: two text fields,
+one send button and `sendNotice` over STDIN. Text accepts `Title | Body`; the
+optional JPEG accepts a local path or HTTP(S) URL. See the
+[current add-on instructions](https://github.com/giflydimarik-gif/Hikvision-Addons/blob/fb45f64265bb9839e60bc1e4d23d3bc5de284993/doorbell/DOCS.md#getting-started).
+Its 117 tests and all five CI jobs passed; a bounded custom-title STDIN/SDK test
+was accepted on VDP-H3212W. This does not establish a live HA click or deployment.
 
-Review: [draft PR #393](https://github.com/pergolafabio/Hikvision-Addons/pull/393),
-revised source `67c12e36b860e1fc617ec2566a5359b99689afa1`, adding HA draft fields,
-type selector, send button and result sensor following maintainer feedback.
-The revision passes122 tests locally, including24 new discovery/control cases;
-live HA rendering and physical control acceptance remain pending.
-The original companion package CI passed on
-[`b8829a8`](https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266).
+The older [PR #393](https://github.com/pergolafabio/Hikvision-Addons/pull/393) was
+closed without merging. Its independent [portable module and MQTT adapter](../../indoor-notifications/README.md),
+six-entity workflow and patch remain archived here at `67c12e36b860e1fc617ec2566a5359b99689afa1`.
+Those contracts belong to that package; PR #394 uses the simpler controls above.
 
 | Patch | Result | Verification |
 | --- | --- | --- |

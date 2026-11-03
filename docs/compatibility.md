@@ -44,3 +44,18 @@ See [the module contract](../indoor-notifications/README.md) and
 [publication validation](../indoor-notifications/VALIDATION.md). The public package
 contains no house-specific rule configuration, private screenshots, serials,
 addresses or credentials. Existing home production was not redeployed for this contribution.
+
+## Current add-on notice review — 2026-11-03
+
+[PR #394](https://github.com/pergolafabio/Hikvision-Addons/pull/394), head `fb45f64265bb`,
+uses `Title | Body`, one optional local/HTTP(S) JPEG, one button and STDIN
+`sendNotice indoor`. It passed 117 tests and all five CI jobs. The exact-source
+STDIN/SDK harness accepted one custom-title level-4 notice on VDP-H3212W without
+deploying the full fork. Earlier HTTPS tests used the same image loader and a
+22,524-byte JPEG. Physical image rendering, a live HA click and Supervisor STDIN
+remain separate acceptance boundaries.
+
+The current add-on path bounds a JPEG to512KiB; our device advertises512KB.
+The portable package's24KiB limit, alarm type, six entities and durable journal
+describe the separate archived PR #393 adapter. That PR was closed without merge.
+See [the current workflow](../indoor-notifications/README.md#актуальный-вклад-в-add-on-pr-394).

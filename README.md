@@ -178,15 +178,26 @@ IP-адреса в примерах заменены на placeholders. Пере
 ## Reviewed integration contributions
 
 The original SIP/DECT example above is supplemented by
-[three accepted Hikvision-Addons fixes and regression tests](contrib/hikvision-addons/README.md),
+[three merged Hikvision-Addons fixes and regression tests](contrib/hikvision-addons/README.md),
 an [updated ringing blueprint](homeassistant/doorbell-ringing.yaml), and
 [explicit compatibility and verification limits](docs/compatibility.md).
 
+| Вклад | Статус на 03.11.2026 |
+| --- | --- |
+| [PR #390](https://github.com/pergolafabio/Hikvision-Addons/pull/390): polling, снимки при звонке, blueprint | Объединён с upstream |
+| [PR #394](https://github.com/pergolafabio/Hikvision-Addons/pull/394): уведомления с текстом/JPEG | Открыт для ревью; текущий код `fb45f64265bb` находится в форке аддона |
+| [PR #393](https://github.com/pergolafabio/Hikvision-Addons/pull/393): расширенный MQTT-адаптер | Закрыт без объединения; пакет сохранён для отдельных экспериментов |
+
 ## Сообщения и картинки на внутренний монитор
 
-[indoor-notifications](indoor-notifications/README.md) — переносимый отправитель
-текста и JPEG через HCNetSDK, примеры Home Assistant, генератор карточки состояния
-и журнал против повторной отправки. Есть тип alarm со штатным звуком.
-MQTT-адаптер предложен отдельно для Hikvision-Addons; это не функция стабильного
-релиза3.0.34. Подробные границы аппаратной проверки и адаптации указаны в модуле.
+[Актуальная инструкция PR #394](https://github.com/giflydimarik-gif/Hikvision-Addons/blob/fb45f64265bb9839e60bc1e4d23d3bc5de284993/doorbell/DOCS.md#getting-started):
+поле `Notice text` принимает `Заголовок | Текст`, `Notice JPEG` — необязательный
+локальный путь или HTTP(S) URL. Отправка — кнопкой `Send notice` или командой
+`sendNotice indoor`. Проверены 117 тестов и все пять CI; установка на рабочий
+домофон и выпуск стабильного add-on этим не подтверждаются.
+
+[indoor-notifications](indoor-notifications/README.md) содержит отдельный переносимый
+отправитель, генератор карточки и архивный адаптер PR #393 с журналом повторов
+и типом alarm. Его шесть сущностей и лимиты относятся к этому пакету.
+Проверки и аппаратные границы описаны в [compatibility](docs/compatibility.md).
 

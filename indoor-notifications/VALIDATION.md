@@ -1,5 +1,22 @@
 # Publication validation —2026-11-03
 
+## Current add-on contribution
+
+[PR #394](https://github.com/pergolafabio/Hikvision-Addons/pull/394), head
+`fb45f64265bb9839e60bc1e4d23d3bc5de284993`, is ready for review:
+117 tests passed, 8 hardware-only skipped, and
+[all five CI jobs passed](https://github.com/pergolafabio/Hikvision-Addons/actions/runs/41612341248).
+The exact-source STDIN dispatcher and shared sender made one accepted native
+custom-title call on VDP-H3212W; live Supervisor STDIN and HA clicks were not
+tested. [Earlier text/JPEG/HTTPS evidence](evidence/pr394-url-2026-11-03/README.md)
+records its own source hashes and visual limitations.
+
+The separate portable package in this folder still passes 23 offline tests.
+The 122-test/six-entity adaptation described below belongs to closed, unmerged
+PR #393 and is retained as historical validation of that artifact.
+
+## Archived PR #393 adaptation
+
 Scope: portable indoor-notice module plus an independent MQTT command for
 Hikvision-Addons. This is an adaptation of our measured native sender, not a new
 claim of universal Hikvision support.

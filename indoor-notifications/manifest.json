@@ -26,12 +26,25 @@
   "upstream_branch": "giflydimarik-gif:feat/indoor-notices-20261103",
   "upstream_commit": "67c12e36b860e1fc617ec2566a5359b99689afa1",
   "upstream_pr": 393,
-  "upstream_pr_state": "draft",
+  "upstream_pr_state": "closed",
   "upstream_pr_url": "https://github.com/pergolafabio/Hikvision-Addons/pull/393",
   "ha_input_tests": 24,
   "live_ha_ui_verified": false,
   "upstream_tests_sha256": {
     "hikvision-doorbell/tests/test_notice_inputs.py": "f6396cb5b3acd167ff9b86514aad76d7555ba85da51fe2326d3d855bf49ca4be"
   },
-  "initial_companion_ci_url": "https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266"
+  "initial_companion_ci_url": "https://github.com/giflydimarik-gif/hikvision-asterisk-dect/actions/runs/41573300266",
+  "upstream_pr_merged": false,
+  "replacement_addon_pr": {
+    "number": 394,
+    "url": "https://github.com/pergolafabio/Hikvision-Addons/pull/394",
+    "observed_state": "open",
+    "reviewed_at": "2026-11-03",
+    "head_commit": "fb45f64265bb9839e60bc1e4d23d3bc5de284993",
+    "tests_passed": 117,
+    "hardware_skipped": 8,
+    "ci_url": "https://github.com/pergolafabio/Hikvision-Addons/actions/runs/41612341248",
+    "contracts_are_independent": true,
+    "live_ha_ui_verified": false
+  }
 }
