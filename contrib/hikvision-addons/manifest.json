@@ -7,5 +7,8 @@
     "blueprints/doorbell-ringing.yaml": "a8c36707093f47769ad644eb04006347b064f77014d5a6aae0abeb9174a3971d",
     "hikvision-doorbell/src/mqtt.py": "7e424813514f1283aaf9bf64ae06a8b56b8306906decaa0033f0fb3b706ff911",
     "hikvision-doorbell/src/mqtt_input.py": "9f4173247f8b3e1a19d20a5c7014b185045c78815c00b9aeb67d4197d6e42ee3"
-  }
+  },
+  "upstream_pr": 390,
+  "upstream_state": "merged",
+  "merged_at": "2026-11-02T08:05:16Z"
 }

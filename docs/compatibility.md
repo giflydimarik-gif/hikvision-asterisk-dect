@@ -25,3 +25,22 @@ For quiet hours, preserve the actual indoor volume across restarts. The current
 add-on keeps the previous volume in memory; repeated mute and restart behavior
 must be considered before treating an unmute to the default 7 as restoration.
 Notifications should remain independent of indoor sound.
+
+## Indoor notifications — publication review,2026-11-03
+
+The earlier table is the2026-11-01 baseline. Later work established the following
+additional, scoped observations on VDP-H3212W/V2.2.22 build230720:
+
+| Feature | Evidence | Limit |
+|---|---|---|
+| Russian text, native notice16008 | User observed banner and full message in the source installation | Other models/firmware are unverified |
+| JPEG attachment | User observed thumbnail/full image of one synthetic640x360 image | The new portable module caps images at24KiB and one attachment |
+| Native alarm-notice type3 | User reported a short siren in the source installation | No programmable duration, TTS or guaranteed sound while muted |
+| Home quiet-volume preservation | Existing private integration confirmed a temporary0→9→0 cycle and kept talk volume/settings | This is a separate integration, not included in the portable MQTT command |
+| Portable SDK/MQTT adaptation | Offline regression tests, C transport stub, JPEG decode and synthetic card inspection | No new physical-device acceptance or Docker-image test for this adaptation |
+| Reading receipt | Bounded earlier observation received no matching event | Neither confirmed reading nor confirmed absence of reading |
+
+See [the module contract](../indoor-notifications/README.md) and
+[publication validation](../indoor-notifications/VALIDATION.md). The public package
+contains no house-specific rule configuration, private screenshots, serials,
+addresses or credentials. Existing home production was not redeployed for this contribution.

@@ -1,0 +1,59 @@
+blueprint:
+  name: Hikvision indoor binary alert and recovery
+  description: >-
+    Example for an installed binary sensor. Requires script.hikvision_indoor_notice
+    and the proposed add-on command. for timers reset after HA restart.
+  domain: automation
+  input:
+    source:
+      name: Existing binary alarm sensor
+      selector:
+        entity:
+          domain: binary_sensor
+    station:
+      name: Exact normalised indoor station name
+      default: indoor
+      selector:
+        text:
+    alarm_title:
+      name: Short title (up to63 UTF-8 bytes)
+      default: Событие дома
+      selector:
+        text:
+    alarm_text:
+      name: Problem message
+      default: Датчик сообщает о проблеме.
+      selector:
+        text:
+    recovery_text:
+      name: Recovery message
+      default: Датчик вернулся в норму.
+      selector:
+        text:
+variables:
+  station_name: !input station
+  notice_title: !input alarm_title
+  problem_text: !input alarm_text
+  restored_text: !input recovery_text
+triggers:
+  - trigger: state
+    entity_id: !input source
+    to: "on"
+    for: "00:01:00"
+    id: problem
+  - trigger: state
+    entity_id: !input source
+    from: "on"
+    to: "off"
+    for: "00:01:05"
+    id: recovery
+actions:
+  - action: script.hikvision_indoor_notice
+    data:
+      station: "{{ station_name }}"
+      request_id: "ha-{{ trigger.to_state.context.id[:24] }}-{{ 'p' if trigger.id == 'problem' else 'r' }}"
+      title: "{{ notice_title }}"
+      message: "{{ problem_text if trigger.id == 'problem' else restored_text }}"
+      level: alarm
+mode: queued
+max: 5

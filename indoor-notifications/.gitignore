@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.sqlite3*
+*.db
+.env*
+notice-journal/
+data/
+*.jpg
+*.jpeg
+*.png
+*.webp
+!examples/card-preview.jpg

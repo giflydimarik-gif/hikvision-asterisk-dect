@@ -1,9 +1,16 @@
-# Proposed fixes for Hikvision-Addons
+# Contributions to Hikvision-Addons
 
 These are independent, reviewable contributions against upstream commit
 `fb6abc177f62c480e39a6dbc9dbee997875c76a9` (main, reviewed 2026-11-01).
-They are **not an upstream release** and have **not been installed on our live intercom**.
-The three changes are proposed as separate commits in [draft PR #390](https://github.com/pergolafabio/Hikvision-Addons/pull/390).
+All three changes were accepted in [PR #390](https://github.com/pergolafabio/Hikvision-Addons/pull/390),
+merged on2026-11-02. These archived patches target the old base above; do not
+reapply them blindly to current upstream. A merge into main does not establish
+that a new stable image has been released or installed on our live intercom.
+
+The next contribution is [indoor text/JPEG notices](../../indoor-notifications/README.md):
+an independent bounded MQTT command, durable no-retry journal, HA examples and
+offline tests. Its patch targets a newer exact upstream base and is kept separate
+from the three already-merged fixes.
 
 | Patch | Result | Verification |
 | --- | --- | --- |
@@ -43,7 +50,7 @@ an old event delivered as a new idle-to-ring transition needs additional live
 verification in the receiving automation. Do not use the blueprint to unlock a
 gate automatically.
 
-## Existing behavior to keep in mind
+## Behavior at the archived base
 
 - `call_state_poll: 0` means a 15-second fallback, not disabled polling. Omit the
   value/use null to leave call polling disabled; choose a positive interval when

@@ -1,0 +1,25 @@
+{
+  "upstream": "pergolafabio/Hikvision-Addons",
+  "base_commit": "eb5be4f95e66d2abdc575bb637a25b8511f7d05d",
+  "hardware_test_of_adaptation": false,
+  "companion_tests": 23,
+  "upstream_passed": 98,
+  "upstream_skipped": 8,
+  "upstream_changed_paths": [
+    "doorbell/DOCS.md",
+    "hikvision-doorbell/src/doorbell.py",
+    "hikvision-doorbell/src/indoor_notice.py",
+    "hikvision-doorbell/src/mqtt.py",
+    "hikvision-doorbell/src/mqtt_input.py",
+    "hikvision-doorbell/tests/test_indoor_notice.py",
+    "hikvision-doorbell/tests/test_notice_command.py"
+  ],
+  "sha256": {
+    "indoor_notice.py": "a110358418b1f45b0f7318fb01bd5e45f719ba9803dea66653dc5695b97e1fe4",
+    "tests/test_indoor_notice.py": "3b554e4e7822a16709617cdee217160cd9fb1c6c8aa36bdb369934a393f85a10",
+    "upstream.patch": "df61db8a884347fee9031977d46d2c11175157b9d834ed614a7fec05642ce8a3",
+    "examples/card-preview.jpg": "8657cf8b591616ad0f5186ea9a131fb7bfb897192a1e19c39b09fcfd3d1fb86f"
+  },
+  "upstream_branch": "giflydimarik-gif:feat/indoor-notices-20261103",
+  "upstream_commit": "7b21b9614a649901489aa210c811d402708d38bb"
+}

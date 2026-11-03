@@ -1,0 +1,999 @@
+diff --git a/doorbell/DOCS.md b/doorbell/DOCS.md
+index e370611..aa5617d 100644
+--- a/doorbell/DOCS.md
++++ b/doorbell/DOCS.md
+@@ -161,6 +161,85 @@ For each of your doorbells, the following entities are available:
+ 
+ ## Sending commands to the doorbells
+ 
++### Indoor text/JPEG notices (proposed command)
++
++On configured **indoor** devices, publish non-retained JSON to
++`hikvision/<normalised_name>/notice/set`. The name follows the existing add-on
++normalisation: lowercase letters/digits, without whitespace or punctuation.
++An empty or colliding indoor name disables the notice topic; rename it first.
++The command is bound to that exact device and re-subscribed after MQTT reconnect.
++Allow only trusted broker clients to publish device commands.
++
++Example Home Assistant action (uses a fresh ID for one new event):
++
++```yaml
++action: mqtt.publish
++data:
++  topic: hikvision/indoor/notice/set
++  qos: 1
++  retain: false
++  payload: >-
++    {{ dict(id='ha-' ~ now().strftime('%Y%m%dT%H%M%S%f'),
++            title='House status', text='The gate is closed.', level='notice',
++            expires_at=as_timestamp(now()) + 60) | to_json }}
++```
++
++For repeated delivery of the **same event**, preserve its original ID. Fields:
++
++| Field | Limit / meaning |
++|---|---|
++| `id` | Required; 1-31 ASCII letters/digits/underscore/hyphen, starts with letter/digit |
++| `title` | Required; 1-63 UTF-8 bytes |
++| `text` | Required; 1-1023 UTF-8 bytes; Cyrillic supported |
++| `expires_at` | Required Unix timestamp; future, at most300 seconds ahead |
++| `level` | `notice` (default, native4) or `alarm` (native3) |
++| `picture` | Optional basename such as `home-status.jpg` in `/media/hikvision-notices` |
++
++Maximum JSON payload8192 bytes. Unknown/duplicate JSON keys are rejected.
++One trusted baseline three-component JPEG, maximum24KiB and640x360; EXIF,
++progressive JPEG, URLs, arbitrary paths, symlinks and special files are rejected.
++The add-on performs a bounded structural check rather than a full JPEG decode.
++Prepare images using a trusted decoder/normaliser outside the add-on. No extra
++Python dependency is introduced here. Docker users need to mount that media
++directory if pictures are used; text does not need it.
++
++Results are published without retain to `hikvision/<name>/notice/result`:
++`accepted`, `rejected`, `unknown`, or `not_sent`, with `send_attempted` and an
++optional SDK code/reason. Successful results include the request ID; invalid
++commands may have no ID. `accepted` confirms SDK acceptance, not screen rendering,
++audible sound or a reading receipt. Result publication is not an end-to-end ACK.
++
++Claims are committed with SQLite FULL synchronous durability **before** SDK16008.
++The existing authenticated SDK session is reused. A repeated ID/content is never
++sent again, including after restart; changed content with the same ID is rejected.
++An interrupted or ambiguous send becomes `unknown` and blocks further IDs for
++that target until reviewed. Busy/unavailable/non-idle devices are rejected with
++no queue or automatic retry. The status read and device write are not atomic, so
++an incoming call can still race them. Messages marked retained by the broker
++(retained delivery on subscription) and expired commands are rejected. Publishers
++must use retain=false. At most one attempt per device per60 seconds;4096 total journal records.
++
++The private journal is `/data/notice-journal/notices.sqlite3` in the add-on,
++`./data/notice-journal` during local development (directory0700/file0600). It stores
++hashes, request IDs, times, statuses and SDK codes; no texts, pictures, credentials
++or raw serials. Preserve this directory across upgrades/rollback. Capacity is a
++hard stop; records are not automatically deleted. After investigating a timeout,
++an administrator can call `NoticeService(...).review(target_sha256, notice_id)`
++inside the existing environment. This only acknowledges the unknown and allows
++new events; it preserves the old ID/status and never retries it.
++
++`alarm` requests the device's built-in alarm-notice sound. This command does not
++change volume, talk volume, scene, quiet hours or call settings; mute may suppress
++sound and firmware controls duration. It does not arm/disarm the security system.
++Native text/JPEG/alarm were observed on VDP-H3212W/V2.2.22 build230720 in the source
++installation. This MQTT adaptation is covered by offline SDK/broker doubles,
++not a new hardware acceptance test. ABI is restricted to the verified64-bit
++layout (NOTICE1552/PIC48/TIME8); other layouts fail closed. No SDK wrapper-wide
++signature or callback changes are made.
++
++Portable renderer, HA examples, regression tests and recorded limitations:
++[companion module](https://github.com/giflydimarik-gif/hikvision-asterisk-dect/tree/main/indoor-notifications).
++
+ There are two ways in which you can interact with your doorbells: 
+ - via the automatically created MQTT entities (switches, buttons)
+ - manually invoking the app `stdin` service
+diff --git a/hikvision-doorbell/src/doorbell.py b/hikvision-doorbell/src/doorbell.py
+index 27ea32f..e782f2b 100644
+--- a/hikvision-doorbell/src/doorbell.py
++++ b/hikvision-doorbell/src/doorbell.py
+@@ -3,6 +3,7 @@ from enum import IntEnum
+ import re
+ import unicodedata
+ import json
++import hashlib
+ import os
+ import requests
+ from requests.auth import HTTPDigestAuth
+@@ -13,6 +14,7 @@ from loguru import logger
+ from config import AppConfig
+ from sdk.hcnetsdk import BOOL, BYTE, DWORD, NET_DVR_VIDEO_INTERCOM_RELATEDEV_CFG, NET_DVR_CALL_STATUS, NET_DVR_JPEGPARA, NET_DVR_VIDEO_CALL_COND, NET_DVR_CLIENTINFO, NET_DVR_VIDEO_CALL_PARAM, NET_DVR_CONTROL_GATEWAY, NET_DVR_DEVICEINFO_V30, NET_DVR_SETUPALARM_PARAM_V50, NET_DVR_VIDEO_INTERCOM_DEVICEID_CFG,  DeviceAbilityType
+ from sdk.utils import SDKError, call_ISAPI
++from indoor_notice import NoticeError, sdk_send
+ import xml.etree.ElementTree as ET
+ 
+ 
+@@ -1031,6 +1033,24 @@ class Doorbell():
+         return 0
+         #raise RuntimeError("Unable to get the number of coms")
+ 
++    def send_indoor_notice(self, payload, service):
++        """Send one bounded native notice using this existing indoor session."""
++        if self._type != DeviceType.INDOOR:
++            raise NoticeError("indoor_device_required")
++        if type(getattr(self, "user_id", None)) is not int or self.user_id < 0:
++            raise NoticeError("sdk_session_invalid")
++        serial = self._device_info.serialNumber()
++        if not isinstance(serial, str) or not serial:
++            raise NoticeError("target_identity_unavailable")
++        target = hashlib.sha256(serial.encode("utf-8")).hexdigest()
++
++        def is_idle():
++            raw = self._call_isapi("GET", "/ISAPI/VideoIntercom/callStatus?format=json")
++            status = json.loads(raw)
++            return isinstance(status, dict) and status.get("CallStatus", {}).get("status") == "idle"
++
++        return service.send(payload, target, is_idle, lambda notice: sdk_send(self._sdk, self.user_id, notice))
++
+     def get_device_info(self):
+         """Retrieve device information (model, sw version, etc) using the ISAPI endpoint.
+         Return the parsed XML document"""
+diff --git a/hikvision-doorbell/src/indoor_notice.py b/hikvision-doorbell/src/indoor_notice.py
+new file mode 100644
+index 0000000..1b7e752
+--- /dev/null
++++ b/hikvision-doorbell/src/indoor_notice.py
+@@ -0,0 +1,366 @@
++# SPDX-License-Identifier: MIT
++# Copyright (c) 2026 giflydimarik-gif
++#
++# Permission is hereby granted, free of charge, to any person obtaining a copy
++# of this software and associated documentation files (the "Software"), to deal
++# in the Software without restriction, including without limitation the rights
++# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++# copies of the Software, and to permit persons to whom the Software is
++# furnished to do so, subject to the following conditions:
++#
++# The above copyright notice and this permission notice shall be included in all
++# copies or substantial portions of the Software.
++#
++# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++# SOFTWARE.
++"""Bounded local indoor notices. No credentials, login, polling or automatic retry.
++
++MIT-licensed original implementation; see LICENSE in the public companion module.
++JPEG validation checks structure, not complete entropy decoding. Use trusted,
++normalised images. SDK structures use 32-bit LONG/DWORD and native pointer alignment.
++"""
++from __future__ import annotations
++
++import ctypes as C
++from dataclasses import dataclass
++from datetime import datetime
++import hashlib
++import json
++import math
++import os
++from pathlib import Path
++import re
++import sqlite3
++import stat
++import sys
++import time
++from typing import Callable
++
++NOTICE_COMMAND = 16008
++MAX_JPEG_BYTES = 24576
++MAX_PAYLOAD_BYTES = 8192
++MAX_RECORDS = 4096
++MIN_INTERVAL = 60
++EXPECTED_ABI = {"LONG": 4, "DWORD": 4, "TIME": 8, "PIC": 48,
++                "NOTICE": 1552, "pics_offset": 1136, "res2_offset": 1424}
++UNCERTAIN_SDK_ERRORS = {7, 8, 9, 10, 11, 14}
++
++class NoticeError(ValueError):
++    pass
++
++
++def jpeg_info(data: bytes) -> dict:
++    """Bounded structural check for one baseline RGB JPEG, without metadata.
++
++    The fixed test asset is additionally decoded by Pillow before publication;
++    this lightweight guest check does not claim to be a full entropy decoder.
++    """
++    if type(data) is not bytes or not 4 <= len(data) <= MAX_JPEG_BYTES:
++        raise NoticeError("jpeg_bytes_or_size_invalid")
++    if data[:2] != b"\xff\xd8" or data[-2:] != b"\xff\xd9":
++        raise NoticeError("jpeg_signature_invalid")
++    offset, frame = 2, None
++    for unused in range(128):
++        if offset + 4 > len(data) or data[offset] != 255:
++            raise NoticeError("jpeg_segment_invalid")
++        marker = data[offset + 1]
++        length = int.from_bytes(data[offset + 2:offset + 4], "big")
++        if marker not in {0xE0, 0xDB, 0xC0, 0xC4, 0xDD, 0xDA}:
++            raise NoticeError("jpeg_mode_or_metadata_unsupported")
++        if length < 2 or offset + length + 2 > len(data):
++            raise NoticeError("jpeg_segment_length_invalid")
++        payload = data[offset + 4:offset + length + 2]
++        offset += length + 2
++        if marker == 0xE0 and (len(payload) != 14 or payload[:5] != b"JFIF\x00" or payload[-2:] != b"\x00\x00"):
++            raise NoticeError("jpeg_metadata_unsupported")
++        if marker == 0xC0:
++            if frame is not None or len(payload) != 15 or payload[0] != 8 or payload[5] != 3:
++                raise NoticeError("jpeg_frame_unsupported")
++            height, width = int.from_bytes(payload[1:3], "big"), int.from_bytes(payload[3:5], "big")
++            if not (1 <= width <= 640 and 1 <= height <= 360):
++                raise NoticeError("jpeg_dimensions_invalid")
++            frame = {"width": width, "height": height}
++        elif marker == 0xDA:
++            if frame is None or len(payload) != 10 or payload[0] != 3 or payload[-3:] != b"\x00\x3f\x00":
++                raise NoticeError("jpeg_scan_unsupported")
++            while offset < len(data) - 1:
++                index = data.find(b"\xff", offset)
++                if index < 0 or index + 1 >= len(data):
++                    break
++                next_marker = data[index + 1]
++                if next_marker == 0 or 0xD0 <= next_marker <= 0xD7:
++                    offset = index + 2
++                elif next_marker == 0xD9 and index + 2 == len(data):
++                    return {**frame, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
++                else:
++                    raise NoticeError("jpeg_entropy_marker_invalid")
++            raise NoticeError("jpeg_scan_incomplete")
++    raise NoticeError("jpeg_header_incomplete")
++
++
++class TimeEx(C.Structure):
++    _fields_ = [("wYear", C.c_uint16), ("byMonth", C.c_uint8),
++                ("byDay", C.c_uint8), ("byHour", C.c_uint8),
++                ("byMinute", C.c_uint8), ("bySecond", C.c_uint8),
++                ("byRes", C.c_uint8)]
++
++
++class NoticePic(C.Structure):
++    _fields_ = [("pPicData", C.c_void_p), ("dwPicDataLen", C.c_uint32),
++                ("byRes", C.c_uint8 * 32)]
++
++
++class NoticeData(C.Structure):
++    _fields_ = [("dwSize", C.c_uint32), ("struTime", TimeEx),
++                ("byNoticeNumber", C.c_uint8 * 32),
++                ("byNoticeTheme", C.c_uint8 * 64),
++                ("byNoticeDetail", C.c_uint8 * 1024),
++                ("byLevel", C.c_uint8), ("byPicNum", C.c_uint8),
++                ("byRes1", C.c_uint8 * 2), ("struNoticePic", NoticePic * 6),
++                ("byRes2", C.c_uint8 * 128)]
++
++
++def abi_layout() -> dict:
++    return {"LONG": C.sizeof(C.c_int32), "DWORD": C.sizeof(C.c_uint32),
++            "TIME": C.sizeof(TimeEx), "PIC": C.sizeof(NoticePic),
++            "NOTICE": C.sizeof(NoticeData),
++            "pics_offset": NoticeData.struNoticePic.offset,
++            "res2_offset": NoticeData.byRes2.offset}
++
++
++def encoded(text: str, maximum: int, label: str) -> bytes:
++    if not isinstance(text, str) or not text.strip():
++        raise NoticeError(label + "_empty")
++    if any(ord(ch) < 32 and ch not in "\n\t" for ch in text):
++        raise NoticeError(label + "_control_character")
++    try:
++        raw = text.encode("utf-8", "strict")
++    except UnicodeError:
++        raise NoticeError(label + "_invalid_unicode") from None
++    if len(raw) > maximum:
++        raise NoticeError(label + "_too_many_utf8_bytes")
++    return raw
++
++
++def _unique_keys(pairs):
++    result = {}
++    for key, value in pairs:
++        if key in result:
++            raise NoticeError("duplicate_json_key")
++        result[key] = value
++    return result
++
++
++def parse_request(payload: bytes) -> dict:
++    if type(payload) is not bytes or not 1 <= len(payload) <= MAX_PAYLOAD_BYTES:
++        raise NoticeError("payload_size_invalid")
++    try:
++        request = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_keys)
++    except (UnicodeError, ValueError, RecursionError):
++        raise NoticeError("json_invalid") from None
++    required = {"id", "title", "text", "expires_at"}
++    if type(request) is not dict or not required <= request.keys() or request.keys() - required - {"level", "picture"}:
++        raise NoticeError("payload_fields_invalid")
++    if type(request["id"]) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,30}", request["id"]):
++        raise NoticeError("id_invalid")
++    encoded(request["title"], 63, "title")
++    encoded(request["text"], 1023, "text")
++    level = request.get("level", "notice")
++    if type(level) is not str or level not in {"notice", "alarm"}:
++        raise NoticeError("level_invalid")
++    expiry = request["expires_at"]
++    if type(expiry) not in (int, float) or not math.isfinite(expiry):
++        raise NoticeError("expiry_invalid")
++    picture = request.get("picture")
++    if picture is not None and (type(picture) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.jpg", picture)):
++        raise NoticeError("picture_name_invalid")
++    return {**request, "level": level}
++
++
++def read_picture(directory: Path, name: str) -> bytes:
++    # Open the directory and file independently without following symlinks.
++    # Basename-only input cannot select another path or a network URL.
++    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.jpg", name):
++        raise NoticeError("picture_name_invalid")
++    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
++    try:
++        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
++        try:
++            info = os.fstat(fd)
++            if not stat.S_ISREG(info.st_mode) or not 4 <= info.st_size <= MAX_JPEG_BYTES:
++                raise NoticeError("picture_file_invalid")
++            with os.fdopen(fd, "rb", closefd=False) as stream:
++                raw = stream.read(MAX_JPEG_BYTES + 1)
++        finally:
++            os.close(fd)
++    finally:
++        os.close(directory_fd)
++    jpeg_info(raw)
++    return raw
++
++
++@dataclass(frozen=True)
++class Notice:
++    notice_id: str
++    title: str
++    text: str
++    created_at: datetime
++    level: str = "notice"
++    picture: bytes | None = None
++
++    def build(self) -> NoticeData:
++        if sys.platform != "linux" or sys.byteorder != "little" or abi_layout() != EXPECTED_ABI:
++            raise NoticeError("unsupported_abi")
++        if type(self.notice_id) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,30}", self.notice_id):
++            raise NoticeError("id_invalid")
++        title, body = encoded(self.title, 63, "title"), encoded(self.text, 1023, "text")
++        if self.level not in ("notice", "alarm"):
++            raise NoticeError("level_invalid")
++        if not isinstance(self.created_at, datetime) or self.created_at.utcoffset() is None or not 2000 <= self.created_at.year <= 2099:
++            raise NoticeError("timestamp_invalid")
++        value = NoticeData()
++        value.dwSize = C.sizeof(value)
++        when = self.created_at
++        value.struTime = TimeEx(when.year, when.month, when.day, when.hour, when.minute, when.second, 0)
++        for field, raw in (("byNoticeNumber", self.notice_id.encode("ascii")), ("byNoticeTheme", title), ("byNoticeDetail", body)):
++            C.memmove(C.addressof(value) + getattr(NoticeData, field).offset, raw, len(raw))
++        value.byLevel = 3 if self.level == "alarm" else 4
++        if self.picture is not None:
++            jpeg_info(self.picture)
++            value._picture_buffer = C.create_string_buffer(self.picture, len(self.picture))
++            value.byPicNum = 1
++            value.struNoticePic[0].pPicData = C.addressof(value._picture_buffer)
++            value.struNoticePic[0].dwPicDataLen = len(self.picture)
++        return value
++
++
++def sdk_send(sdk, user_id: int, notice: Notice) -> dict:
++    if type(user_id) is not int or not 0 <= user_id <= 2147483647:
++        raise NoticeError("sdk_session_invalid")
++    block = notice.build()
++    # A private function wrapper leaves the existing SDK wrapper/signatures intact.
++    if isinstance(sdk, C.CDLL):
++        send = C.CFUNCTYPE(C.c_int32, C.c_int32, C.c_uint32, C.c_void_p, C.c_uint32)(("NET_DVR_RemoteControl", sdk))
++        last_error = C.CFUNCTYPE(C.c_uint32)(("NET_DVR_GetLastError", sdk))
++    else:  # Injectable transport double; never loads a device/library in tests.
++        send, last_error = sdk.NET_DVR_RemoteControl, sdk.NET_DVR_GetLastError
++    accepted = bool(send(user_id, NOTICE_COMMAND, C.byref(block), C.sizeof(block)))
++    error = None if accepted else int(last_error())
++    return {"status": "accepted" if accepted else "unknown" if error in UNCERTAIN_SDK_ERRORS else "rejected",
++            "device_accepted": accepted, "sdk_error": error}
++
++
++class NoticeService:
++    """One synchronous attempt, with a durable claim before the first SDK write.
++
++    Unknown/in-flight attempts block subsequent IDs for that target until an
++    operator reviews them. A review never resends the old ID. No text/image bytes
++    or device credentials enter the journal or returned status.
++    """
++
++    def __init__(self, journal: Path, picture_directory: Path, clock: Callable = time.time):
++        self.journal, self.picture_directory, self.clock = Path(journal), Path(picture_directory), clock
++
++    def _connect(self):
++        self.journal.mkdir(parents=True, mode=0o700, exist_ok=True)
++        info = self.journal.lstat()
++        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
++            raise NoticeError("journal_directory_not_private")
++        path = self.journal / "notices.sqlite3"
++        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
++        try:
++            info = os.fstat(fd)
++            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1:
++                raise NoticeError("journal_file_not_private")
++        finally:
++            os.close(fd)
++        db = sqlite3.connect(path, timeout=0.5, isolation_level=None)
++        try:
++            db.execute("PRAGMA trusted_schema=OFF")
++            db.execute("PRAGMA synchronous=FULL")
++            db.execute("CREATE TABLE IF NOT EXISTS notices (target TEXT, id TEXT, digest TEXT, created REAL, "
++                       "status TEXT, sdk_error INTEGER, reviewed_at REAL, PRIMARY KEY(target,id))")
++        except Exception:
++            db.close()
++            raise
++        return db
++
++    @staticmethod
++    def _target(target):
++        if type(target) is not str or not re.fullmatch(r"[a-f0-9]{64}", target):
++            raise NoticeError("target_fingerprint_invalid")
++
++    def send(self, payload: bytes, target: str, is_idle: Callable, transport: Callable) -> dict:
++        request = parse_request(payload)
++        self._target(target)
++        now = self.clock()
++        if not now < request["expires_at"] <= now + 300:
++            raise NoticeError("command_expired_or_too_far_ahead")
++        picture = read_picture(self.picture_directory, request["picture"]) if request.get("picture") else None
++        notice = Notice(request["id"], request["title"], request["text"],
++                        datetime.fromtimestamp(now).astimezone(), request["level"], picture)
++        notice.build()  # Validate every field, picture and ABI before claiming.
++        content = {k: request[k] for k in ("id", "title", "text", "level")}
++        content["picture_sha256"] = hashlib.sha256(picture).hexdigest() if picture else None
++        digest = hashlib.sha256(json.dumps(content, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
++        db = self._connect()
++        try:
++            db.execute("BEGIN IMMEDIATE")
++            old = db.execute("SELECT digest,status,sdk_error FROM notices WHERE target=? AND id=?", (target, notice.notice_id)).fetchone()
++            if old:
++                if old[0] != digest:
++                    raise NoticeError("id_content_conflict")
++                status = "unknown" if old[1] == "sending" else old[1]
++                return {"id": notice.notice_id, "status": status, "duplicate": True, "send_attempted": False,
++                        "device_accepted": status == "accepted", "sdk_error": old[2]}
++            if db.execute("SELECT 1 FROM notices WHERE target=? AND status IN ('sending','unknown') AND reviewed_at IS NULL", (target,)).fetchone():
++                raise NoticeError("previous_attempt_needs_review")
++            if db.execute("SELECT COUNT(*) FROM notices").fetchone()[0] >= MAX_RECORDS:
++                raise NoticeError("journal_capacity_reached")
++            last = db.execute("SELECT MAX(created) FROM notices WHERE target=?", (target,)).fetchone()[0]
++            if last is not None and now - last < MIN_INTERVAL:
++                raise NoticeError("rate_limited")
++            # Exact current read; unavailable, unknown and busy all fail closed.
++            if is_idle() is not True:
++                raise NoticeError("device_not_idle")
++            if self.clock() >= request["expires_at"]:
++                raise NoticeError("command_expired_or_too_far_ahead")
++            db.execute("INSERT INTO notices VALUES (?,?,?,?,?,NULL,NULL)", (target, notice.notice_id, digest, now, "sending"))
++            db.execute("COMMIT")  # FULL synchronous commit precedes transport.
++            try:
++                result = transport(notice)
++                if type(result) is not dict or result.get("status") not in {"accepted", "rejected", "unknown"}:
++                    raise NoticeError("transport_result_invalid")
++                error = result.get("sdk_error")
++                if error is not None and (type(error) is not int or not 0 <= error <= 4294967295):
++                    raise NoticeError("transport_error_invalid")
++            except Exception:
++                result = {"status": "unknown", "sdk_error": None}
++            try:
++                db.execute("UPDATE notices SET status=?,sdk_error=? WHERE target=? AND id=?",
++                           (result["status"], result.get("sdk_error"), target, notice.notice_id))
++            except sqlite3.Error:
++                # The durable sending claim remains: never label this not_sent.
++                result = {"status": "unknown", "sdk_error": None}
++            return {"id": notice.notice_id, "status": result["status"], "sdk_error": result.get("sdk_error"),
++                    "send_attempted": True, "duplicate": False, "device_accepted": result["status"] == "accepted"}
++        finally:
++            db.close()
++
++    def review(self, target: str, notice_id: str):
++        """Admin-only acknowledgement after investigation; retains old ID/status."""
++        self._target(target)
++        db = self._connect()
++        try:
++            changed = db.execute("UPDATE notices SET reviewed_at=? WHERE target=? AND id=? "
++                                 "AND status IN ('sending','unknown') AND reviewed_at IS NULL",
++                                 (self.clock(), target, notice_id)).rowcount
++            if changed != 1:
++                raise NoticeError("unreviewed_unknown_not_found")
++        finally:
++            db.close()
+diff --git a/hikvision-doorbell/src/mqtt.py b/hikvision-doorbell/src/mqtt.py
+index 24ee874..aec9bff 100644
+--- a/hikvision-doorbell/src/mqtt.py
++++ b/hikvision-doorbell/src/mqtt.py
+@@ -37,6 +37,14 @@ _mqtt_broker_online = True
+ 
+ _shared_client = None
+ _registered_entities = {}
++_command_topics = {}
++
++
++def _register_command_topic(client, topic, callback):
++    """Register an exact command topic and retain it for reconnect subscriptions."""
++    _command_topics[topic] = callback
++    client.message_callback_add(topic, callback)
++    client.subscribe(topic, qos=1)
+ 
+ def get_shared_client(config):
+     global _shared_client
+@@ -62,6 +70,8 @@ def _on_connect(client, userdata, *args):
+         e.set_availability(True)
+         if hasattr(e, '_command_topic'):
+             client.subscribe(e._command_topic, qos=1)
++    for topic in _command_topics:
++        client.subscribe(topic, qos=1)
+ 
+ def _on_disconnect(client, userdata, *args):
+     global _mqtt_broker_online
+@@ -742,4 +752,4 @@ class MQTTHandler(EventHandler):
+ def get_mqtt_handler():
+     """Get the current MQTTHandler instance"""
+     global _current_mqtt_handler
+-    return _current_mqtt_handler
+\ No newline at end of file
++    return _current_mqtt_handler
+diff --git a/hikvision-doorbell/src/mqtt_input.py b/hikvision-doorbell/src/mqtt_input.py
+index 7c0079b..cd8d6ef 100644
+--- a/hikvision-doorbell/src/mqtt_input.py
++++ b/hikvision-doorbell/src/mqtt_input.py
+@@ -4,6 +4,7 @@ import os
+ import base64
+ import re
+ import time
++import sqlite3
+ from typing import Any, cast
+ from config import AppConfig
+ from pathlib import Path
+@@ -11,7 +12,8 @@ from doorbell import DeviceType, Doorbell, Registry, sanitize_doorbell_name
+ from ha_mqtt_discoverable import Settings, Discoverable
+ from ha_mqtt_discoverable.sensors import Button, ButtonInfo, Text, TextInfo, SensorInfo, Sensor, ImageInfo, Image, SelectInfo, Select, SwitchInfo
+ from loguru import logger
+-from mqtt import extract_device_info, _register_reconnect_handler, get_shared_client
++from mqtt import extract_device_info, _register_reconnect_handler, _register_command_topic, get_shared_client
++from indoor_notice import NoticeError, NoticeService
+ from paho.mqtt.client import MQTTMessage
+ from sdk.hcnetsdk import (NET_DVR_JPEGPARA, NET_DVR_DEVICEINFO_V30)
+ import xml.etree.ElementTree as ET
+@@ -37,6 +39,7 @@ class MQTTInput():
+         self._doorbells = doorbells
+         logger.debug("Setting up MQTTInput")
+         shared_client = get_shared_client(config)
++        self._notice_service = NoticeService(DATA_DIR / "notice-journal", Path("/media/hikvision-notices"))
+         mqtt_settings = Settings.MQTT(
+             host=config.host,
+             port=config.port,
+@@ -50,6 +53,9 @@ class MQTTInput():
+         self._scene_sensor_tasks = {}
+         self._alarm_sensor_tasks = {}
+ 
++        notice_names = [sanitize_doorbell_name(d._config.name) for d in doorbells.values()
++                        if d._type == DeviceType.INDOOR]
++
+         for doorbell in doorbells.values():
+             self._sensors[doorbell] = {}
+ 
+@@ -58,6 +64,16 @@ class MQTTInput():
+ 
+             # Remove spaces and - from doorbell name
+             sanitized_doorbell_name = sanitize_doorbell_name(doorbell_name)
++
++            if doorbell._type == DeviceType.INDOOR and sanitized_doorbell_name and notice_names.count(sanitized_doorbell_name) == 1:
++                topic = f"hikvision/{sanitized_doorbell_name}/notice/set"
++
++                def notice_callback(client, userdata, message, device=doorbell):
++                    self._notice_callback(client, device, message)
++
++                _register_command_topic(shared_client, topic, notice_callback)
++            elif doorbell._type == DeviceType.INDOOR:
++                logger.warning("Notice topic is empty or ambiguous; use unique configured indoor station names")
+             
+             ###########
+             # Reboot button
+@@ -467,6 +483,24 @@ class MQTTInput():
+                 _register_reconnect_handler(broadcast_audio_path_text)
+                 self._sensors[doorbell]['broadcast_audio_path'] = broadcast_audio_path_text
+ 
++    def _notice_callback(self, client, doorbell: Doorbell, message: MQTTMessage):
++        # This callback is bound to the exact device at registration; it never
++        # uses the legacy fuzzy topic/name resolver for a notice destination.
++        topic = f"hikvision/{sanitize_doorbell_name(doorbell._config.name)}/notice"
++        if message.retain:
++            result = {"status": "not_sent", "reason": "retained_command_rejected", "send_attempted": False}
++        else:
++            try:
++                result = doorbell.send_indoor_notice(message.payload, self._notice_service)
++            except NoticeError as error:
++                result = {"status": "not_sent", "reason": str(error), "send_attempted": False}
++            except (SDKError, OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
++                result = {"status": "not_sent", "reason": "notice_unavailable", "send_attempted": False}
++        # Message content, paths, serials and exception strings are not logged.
++        logger.info("Indoor notice result: {}", result["status"])
++        client.publish(topic + "/result", json.dumps(result), qos=1, retain=False)
++        return result
++
+     def _load_persistent_data(self):
+         try:
+             if PERSISTENT_DATA_FILE.exists():
+diff --git a/hikvision-doorbell/tests/test_indoor_notice.py b/hikvision-doorbell/tests/test_indoor_notice.py
+new file mode 100644
+index 0000000..830e20a
+--- /dev/null
++++ b/hikvision-doorbell/tests/test_indoor_notice.py
+@@ -0,0 +1,242 @@
++"""Offline transport, privacy and crash tests; no real device or broker."""
++import ctypes as C
++from datetime import datetime, timezone
++import hashlib
++import json
++import os
++from pathlib import Path
++import sqlite3
++import tempfile
++import unittest
++from unittest.mock import Mock, patch
++
++import indoor_notice as module
++from indoor_notice import Notice, NoticeData, NoticeError, NoticeService, abi_layout, jpeg_info, parse_request, read_picture, sdk_send
++
++# Synthetic 1x1 baseline RGB JPEG, created with Pillow. No real camera/person.
++import base64
++JPEG = base64.b64decode('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AJ8AwIf/2Q==')
++
++
++class NoticeTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.pictures = self.root / "pictures"
++        self.pictures.mkdir()
++        self.now = 1793674800.0
++        self.service = NoticeService(self.root / "journal", self.pictures, lambda: self.now)
++        self.target = hashlib.sha256(b"synthetic-device").hexdigest()
++        self.idle = Mock(return_value=True)
++        self.transport = Mock(return_value={"status": "accepted", "device_accepted": True, "sdk_error": None})
++
++    def payload(self, **changes):
++        data = {"id": "test-1", "title": "Проверка", "text": "Котёл работает\nВсе в норме", "expires_at": self.now + 120}
++        data.update(changes)
++        return json.dumps(data, ensure_ascii=False).encode()
++
++    def send(self, **changes):
++        return self.service.send(self.payload(**changes), self.target, self.idle, self.transport)
++
++    def test_layout_and_cyrillic_byte_boundaries(self):
++        self.assertEqual(abi_layout(), module.EXPECTED_ABI)
++        self.send(title="я" * 31 + "x", text="я" * 511 + "x")
++        for changes in ({"title": "я" * 32}, {"text": "я" * 512}, {"text": "bad\x00text"}, {"id": "../test"}):
++            with self.subTest(changes=changes), self.assertRaises(NoticeError):
++                parse_request(self.payload(**changes))
++
++    def test_strict_json_types_keys_and_boundaries(self):
++        for raw in (b"{}", b"[]", b"null", b'"str"', b'{}' * 4097, b"\xff",
++                    self.payload(text=True), self.payload(expires_at=True), self.payload(expires_at=float('nan')),
++                    self.payload(level=[]), self.payload(extra=1), self.payload(picture="../secret.jpg"),
++                    self.payload(picture="https://example.com/a.jpg"), self.payload(picture="a.png"),
++                    b'{"id":"one","id":"two"}'):
++            with self.subTest(raw=raw[:80]), self.assertRaises(NoticeError):
++                parse_request(raw)
++
++    def test_alarm_and_notice_exact_abi_buffers(self):
++        for level, expected in (("alarm", 3), ("notice", 4)):
++            item = Notice("test", "Тема", "Текст", datetime.now(timezone.utc), level, JPEG)
++            def remote(user, command, pointer, size):
++                self.assertEqual((user, command, size), (1, 16008, 1552))
++                value = C.cast(pointer, C.POINTER(NoticeData)).contents
++                self.assertEqual(value.byLevel, expected)
++                self.assertEqual(value.byPicNum, 1)
++                self.assertEqual(bytes(value.byNoticeTheme).split(b"\0")[0].decode(), "Тема")
++                self.assertEqual(C.string_at(value.struNoticePic[0].pPicData, value.struNoticePic[0].dwPicDataLen), JPEG)
++                self.assertFalse(value.struNoticePic[1].pPicData)
++                self.assertFalse(any(value.byRes2))
++                return 1
++            sdk = Mock()
++            sdk.NET_DVR_RemoteControl.side_effect = remote
++            self.assertEqual(sdk_send(sdk, 1, item)["status"], "accepted")
++            sdk.NET_DVR_GetLastError.assert_not_called()
++
++    def test_sdk_errors_and_invalid_session(self):
++        item = Notice("test", "Title", "Text", datetime.now(timezone.utc))
++        sdk = Mock()
++        sdk.NET_DVR_RemoteControl.return_value = 0
++        for error, expected in ((10, "unknown"), (29, "rejected")):
++            sdk.NET_DVR_GetLastError.return_value = error
++            self.assertEqual(sdk_send(sdk, 1, item)["status"], expected)
++        for session in (-1, True, 2147483648):
++            with self.assertRaises(NoticeError):
++                sdk_send(sdk, session, item)
++
++    def test_restart_duplicate_does_not_retry(self):
++        self.assertEqual(self.send()["status"], "accepted")
++        self.service = NoticeService(self.root / "journal", self.pictures, lambda: self.now)
++        self.assertEqual(self.send()["duplicate"], True)
++        self.transport.assert_called_once()
++        self.idle.assert_called_once()
++
++    def test_same_id_changed_content_or_sound_is_rejected(self):
++        self.send()
++        for changes in ({"text": "Another"}, {"level": "alarm"}):
++            with self.assertRaisesRegex(NoticeError, "id_content_conflict"):
++                self.send(**changes)
++        self.transport.assert_called_once()
++
++    def test_busy_unknown_or_unavailable_never_claims(self):
++        for state in (False, None, "idle"):
++            self.idle.return_value = state
++            with self.assertRaisesRegex(NoticeError, "device_not_idle"):
++                self.send()
++        self.transport.assert_not_called()
++        self.idle.return_value = True
++        self.assertEqual(self.send()["status"], "accepted")
++
++    def test_expiry_before_send_and_while_reading_idle(self):
++        for expiry in (self.now, self.now - 1, self.now + 301):
++            with self.assertRaises(NoticeError):
++                self.send(expires_at=expiry)
++        def slow_read():
++            self.now += 121
++            return True
++        self.idle.side_effect = slow_read
++        with self.assertRaisesRegex(NoticeError, "command_expired"):
++            self.send()
++        self.transport.assert_not_called()
++
++    def test_durable_claim_is_visible_before_transport(self):
++        def transport(notice):
++            with sqlite3.connect(self.root / "journal" / "notices.sqlite3") as db:
++                self.assertEqual(db.execute("SELECT status FROM notices").fetchone()[0], "sending")
++            return {"status": "accepted"}
++        self.transport.side_effect = transport
++        self.send()
++
++    def test_timeout_unknown_blocks_new_id_and_is_never_replayed(self):
++        self.transport.side_effect = TimeoutError("private transport detail")
++        result = self.send()
++        self.assertEqual(result["status"], "unknown")
++        self.assertNotIn("private", json.dumps(result))
++        self.assertFalse(self.send()["send_attempted"])
++        self.now += 61
++        with self.assertRaisesRegex(NoticeError, "previous_attempt_needs_review"):
++            self.send(id="new")
++        self.transport.assert_called_once()
++        self.service.review(self.target, "test-1")
++        self.transport.side_effect = None
++        self.send(id="new")
++        self.assertEqual(self.transport.call_count, 2)
++        self.assertEqual(self.send()["status"], "unknown")
++
++    def test_crash_sending_claim_survives_restart(self):
++        self.transport.side_effect = KeyboardInterrupt()
++        with self.assertRaises(KeyboardInterrupt):
++            self.send()
++        self.service = NoticeService(self.root / "journal", self.pictures, lambda: self.now)
++        self.assertEqual(self.send()["status"], "unknown")
++        self.assertFalse(self.send()["send_attempted"])
++        self.transport.assert_called_once()
++
++    def test_rate_and_capacity_are_persistent(self):
++        self.send()
++        with self.assertRaisesRegex(NoticeError, "rate_limited"):
++            self.send(id="second")
++        self.now += 60
++        self.send(id="second")
++        self.now += 60
++        with patch.object(module, "MAX_RECORDS", 2), self.assertRaisesRegex(NoticeError, "journal_capacity"):
++            self.send(id="third")
++        self.assertEqual(self.transport.call_count, 2)
++
++    def test_other_device_has_independent_rate_and_unknown_gate(self):
++        self.transport.return_value = {"status": "unknown"}
++        self.send()
++        other = hashlib.sha256(b"other-device").hexdigest()
++        self.service.send(self.payload(), other, self.idle, self.transport)
++        self.assertEqual(self.transport.call_count, 2)
++
++    def test_metadata_does_not_contain_text_image_or_serial(self):
++        self.send()
++        with sqlite3.connect(self.root / "journal" / "notices.sqlite3") as db:
++            data = repr(db.execute("SELECT * FROM notices").fetchall())
++        self.assertNotIn("Котёл", data)
++        self.assertNotIn("synthetic-device", data)
++        self.assertEqual((self.root / "journal").stat().st_mode & 0o777, 0o700)
++        self.assertEqual((self.root / "journal" / "notices.sqlite3").stat().st_mode & 0o777, 0o600)
++
++    def test_journal_symlink_or_public_permissions_rejected(self):
++        directory = self.root / "journal"
++        directory.mkdir(mode=0o755)
++        directory.chmod(0o755)
++        with self.assertRaisesRegex(NoticeError, "journal_directory_not_private"):
++            self.send()
++        directory.chmod(0o700)
++        (directory / "notices.sqlite3").symlink_to(self.root / "other")
++        with self.assertRaises(OSError):
++            self.send()
++        self.transport.assert_not_called()
++
++    def test_jpeg_signature_metadata_progressive_size_and_dimensions(self):
++        self.assertEqual(jpeg_info(JPEG)["width"], 1)
++        for data in (b"not jpeg", JPEG + b"extra", JPEG[:-2], JPEG * 100,
++                     JPEG[:2] + b"\xff\xe1\x00\x04AB" + JPEG[2:], JPEG.replace(b"\xff\xc0", b"\xff\xc2", 1)):
++            with self.assertRaises(NoticeError):
++                jpeg_info(data)
++        changed = bytearray(JPEG)
++        offset = changed.index(b"\xff\xc0")
++        changed[offset + 7:offset + 9] = (641).to_bytes(2, "big")
++        with self.assertRaisesRegex(NoticeError, "dimensions"):
++            jpeg_info(bytes(changed))
++
++    def test_picture_basename_symlink_fifo_and_bounded_read(self):
++        (self.pictures / "one.jpg").write_bytes(JPEG)
++        self.assertEqual(read_picture(self.pictures, "one.jpg"), JPEG)
++        (self.pictures / "link.jpg").symlink_to(self.pictures / "one.jpg")
++        os.mkfifo(self.pictures / "fifo.jpg")
++        for name in ("../one.jpg", "link.jpg", "fifo.jpg"):
++            with self.assertRaises((NoticeError, OSError)):
++                read_picture(self.pictures, name)
++        self.send(picture="one.jpg")
++        self.assertEqual(self.transport.call_args.args[0].picture, JPEG)
++
++    def test_changed_picture_with_same_id_is_not_resent(self):
++        path = self.pictures / "one.jpg"
++        path.write_bytes(JPEG)
++        self.send(picture="one.jpg")
++        # Change a valid quantization-table byte; structure remains valid.
++        other = bytearray(JPEG)
++        other[30] ^= 1
++        path.write_bytes(other)
++        with self.assertRaisesRegex(NoticeError, "id_content_conflict"):
++            self.send(picture="one.jpg")
++        self.transport.assert_called_once()
++
++    def test_independent_connections_cannot_claim_same_id_twice(self):
++        second = NoticeService(self.root / "journal", self.pictures, lambda: self.now)
++        def during_send(notice):
++            result = second.send(self.payload(), self.target, self.idle, Mock())
++            self.assertEqual(result["status"], "unknown")
++            self.assertFalse(result["send_attempted"])
++            return {"status": "accepted"}
++        self.transport.side_effect = during_send
++        self.send()
++        self.transport.assert_called_once()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/hikvision-doorbell/tests/test_notice_command.py b/hikvision-doorbell/tests/test_notice_command.py
+new file mode 100644
+index 0000000..b2fc898
+--- /dev/null
++++ b/hikvision-doorbell/tests/test_notice_command.py
+@@ -0,0 +1,121 @@
++"""Exercise actual Doorbell/MQTT adapters with no device or broker."""
++import hashlib
++import json
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import Mock
++import pytest
++
++from config import AppConfig
++from doorbell import DeviceType, Doorbell, Registry
++from indoor_notice import NoticeError, NoticeService
++import mqtt
++from mqtt_input import MQTTInput
++
++
++@pytest.fixture
++def station(tmp_path):
++    sdk = Mock()
++    sdk.NET_DVR_RemoteControl.return_value = 1
++    config = AppConfig.Doorbell(name="Indoor", ip="example.invalid", username="example", password="example")
++    device = Doorbell(0, config, sdk)
++    device._type = DeviceType.INDOOR
++    device._device_info = SimpleNamespace(serialNumber=lambda: "synthetic-station")
++    device.user_id = 0
++    device._call_isapi = Mock(return_value='{"CallStatus":{"status":"idle"}}')
++    service = NoticeService(tmp_path / "journal", tmp_path / "pictures", lambda: 1793674800.0)
++    return device, service
++
++
++def payload(**changes):
++    return json.dumps({"id": "ha-test", "title": "Проверка", "text": "Текст с кавычками: \"да\"",
++                       "expires_at": 1793674860, **changes}, ensure_ascii=False).encode()
++
++
++def test_actual_adapter_uses_existing_login_and_exact_command(station):
++    device, service = station
++    result = device.send_indoor_notice(payload(level="alarm"), service)
++    assert result["status"] == "accepted"
++    device._call_isapi.assert_called_once_with("GET", "/ISAPI/VideoIntercom/callStatus?format=json")
++    assert device._sdk.NET_DVR_RemoteControl.call_args.args[0:2] == (0, 16008)
++    assert device.send_indoor_notice(payload(level="alarm"), service)["duplicate"]
++    device._sdk.NET_DVR_RemoteControl.assert_called_once()
++    device._sdk.NET_DVR_Login_V30.assert_not_called()
++
++
++@pytest.mark.parametrize("status", ["ring", "ringing", "calling", "onCall", "unknown", "unavailable", ""])
++def test_busy_or_unknown_does_not_write(station, status):
++    device, service = station
++    device._call_isapi.return_value = json.dumps({"CallStatus": {"status": status}})
++    with pytest.raises(NoticeError, match="device_not_idle"):
++        device.send_indoor_notice(payload(), service)
++    device._sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_wrong_type_or_missing_identity_does_not_write(station):
++    device, service = station
++    device._type = DeviceType.OUTDOOR
++    with pytest.raises(NoticeError, match="indoor_device_required"):
++        device.send_indoor_notice(payload(), service)
++    device._type = DeviceType.INDOOR
++    device._device_info.serialNumber = lambda: ""
++    with pytest.raises(NoticeError, match="identity_unavailable"):
++        device.send_indoor_notice(payload(), service)
++    device._sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_mqtt_retained_is_rejected_and_private_payload_is_not_published(station):
++    device, service = station
++    reader = MQTTInput.__new__(MQTTInput)
++    reader._notice_service = service
++    client = Mock()
++    message = SimpleNamespace(payload=payload(), retain=True)
++    result = reader._notice_callback(client, device, message)
++    assert result["status"] == "not_sent"
++    device._sdk.NET_DVR_RemoteControl.assert_not_called()
++    message.retain = False
++    result = reader._notice_callback(client, device, message)
++    assert result["status"] == "accepted"
++    topic, output = client.publish.call_args.args
++    assert topic == "hikvision/indoor/notice/result"
++    assert "Текст" not in output and "synthetic-station" not in output
++    assert client.publish.call_args.kwargs == {"qos": 1, "retain": False}
++
++
++@pytest.mark.parametrize("raw", [b"{}", b"bad", payload(expires_at=0), payload(picture="../secret.jpg")])
++def test_mqtt_bad_commands_do_not_crash_or_send(station, raw):
++    device, service = station
++    reader = MQTTInput.__new__(MQTTInput)
++    reader._notice_service = service
++    result = reader._notice_callback(Mock(), device, SimpleNamespace(payload=raw, retain=False))
++    assert result["status"] == "not_sent"
++    device._sdk.NET_DVR_RemoteControl.assert_not_called()
++
++
++def test_exact_topic_registration_survives_reconnect(monkeypatch):
++    monkeypatch.setattr(mqtt, "_command_topics", {})
++    monkeypatch.setattr(mqtt, "_registered_entities", {})
++    client, callback = Mock(), Mock()
++    mqtt._register_command_topic(client, "hikvision/indoor/notice/set", callback)
++    client.message_callback_add.assert_called_once_with("hikvision/indoor/notice/set", callback)
++    client.subscribe.reset_mock()
++    mqtt._on_connect(client, None)
++    client.subscribe.assert_called_once_with("hikvision/indoor/notice/set", qos=1)
++
++
++def test_ambiguous_names_disable_notice_topic(station, mocker):
++    device, service = station
++    second = Doorbell(1, AppConfig.Doorbell(name="In-door", ip="example.invalid", username="x", password="x"), Mock())
++    second._type = DeviceType.INDOOR
++    second._device_info = device._device_info
++    second.user_id = 1
++    registry = Registry()
++    registry[0], registry[1] = device, second
++    mocker.patch("mqtt_input.get_shared_client", return_value=Mock(spec=mqtt.mqtt.Client))
++    from ha_mqtt_discoverable import DeviceInfo
++    mocker.patch("mqtt_input.extract_device_info", return_value=DeviceInfo(name="example", identifiers="fixture"))
++    for name in ("Button", "Text", "Image", "Select", "Sensor", "_register_reconnect_handler"):
++        mocker.patch("mqtt_input." + name)
++    register = mocker.patch("mqtt_input._register_command_topic")
++    MQTTInput(AppConfig.MQTT(host="example.invalid"), registry)
++    register.assert_not_called()

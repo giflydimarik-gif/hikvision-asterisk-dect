@@ -1,0 +1,49 @@
+# Merge this mapping into scripts.yaml. Requires the proposed add-on MQTT command.
+hikvision_indoor_notice:
+  alias: Hikvision indoor notice
+  description: Send an explicit, short-lived local notice with a stable event ID.
+  mode: queued
+  max: 5
+  fields:
+    station:
+      description: Exact normalised configured station name, e.g. indoor.
+      required: true
+      selector:
+        text:
+    request_id:
+      description: Stable unique ID for this event, max31 ASCII letters/digits/_/-.
+      required: true
+      selector:
+        text:
+    title:
+      required: true
+      selector:
+        text:
+    message:
+      required: true
+      selector:
+        text:
+          multiline: true
+    level:
+      default: notice
+      selector:
+        select:
+          options:
+            - notice
+            - alarm
+    picture:
+      description: Optional normalised basename from /media/hikvision-notices.
+      selector:
+        text:
+  sequence:
+    - condition: template
+      value_template: "{{ station is string and station | length > 0 and '/' not in station and '+' not in station and '#' not in station }}"
+    - action: mqtt.publish
+      data:
+        topic: "hikvision/{{ station }}/notice/set"
+        qos: 1
+        retain: false
+        payload: >-
+          {% set p = dict(id=request_id, title=title, text=message,
+             level=level | default('notice'), expires_at=as_timestamp(now()) + 60) %}
+          {{ (dict(p, picture=picture) if picture | default('') else p) | to_json }}

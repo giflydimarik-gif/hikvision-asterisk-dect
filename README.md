@@ -178,7 +178,15 @@ IP-адреса в примерах заменены на placeholders. Пере
 ## Reviewed integration contributions
 
 The original SIP/DECT example above is supplemented by
-[three proposed Hikvision-Addons fixes and regression tests](contrib/hikvision-addons/README.md),
+[three accepted Hikvision-Addons fixes and regression tests](contrib/hikvision-addons/README.md),
 an [updated ringing blueprint](homeassistant/doorbell-ringing.yaml), and
 [explicit compatibility and verification limits](docs/compatibility.md).
+
+## Сообщения и картинки на внутренний монитор
+
+[indoor-notifications](indoor-notifications/README.md) — переносимый отправитель
+текста и JPEG через HCNetSDK, примеры Home Assistant, генератор карточки состояния
+и журнал против повторной отправки. Есть тип alarm со штатным звуком.
+MQTT-адаптер предложен отдельно для Hikvision-Addons; это не функция стабильного
+релиза3.0.34. Подробные границы аппаратной проверки и адаптации указаны в модуле.
 
